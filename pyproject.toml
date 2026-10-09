@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "minigpt"
+version = "0.1.0"
+description = "GPT from scratch: byte-level BPE, transformer model, pretraining, fine-tuning, SFT, and DPO"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch>=2.4",
+    "numpy",
+]
+
+[project.optional-dependencies]
+hf = [
+    "safetensors",
+    "huggingface_hub",
+]
+test = [
+    "transformers",
+]
+
+[project.scripts]
+minigpt = "minigpt.cli:main"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
