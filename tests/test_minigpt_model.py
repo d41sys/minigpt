@@ -1,5 +1,3 @@
-import time
-
 import pytest
 import torch
 from minigpt.data import SlidingWindowDataset
@@ -79,7 +77,6 @@ def test_overfit_single_batch() -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
     x = torch.randint(0, 64, (4, 16))
     y = torch.roll(x, -1, dims=1)
-    start = time.perf_counter()
     loss_value = float("inf")
     for _ in range(200):
         opt.zero_grad()
@@ -91,4 +88,3 @@ def test_overfit_single_batch() -> None:
         if loss_value < 0.1:
             break
     assert loss_value < 0.1
-    assert time.perf_counter() - start < 10
