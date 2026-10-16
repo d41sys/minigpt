@@ -68,7 +68,7 @@ needs internet and the extras:
 All numbers come from one run on an Apple-silicon Mac (`device=mps`), seed 0, with the
 CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, BPE vocab 1024.
 
-All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), most likely GPU (MPS) non-determinism in training (not verified).
+All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), cause not identified (same-seed reruns now reproduce exactly, so it is not run-to-run non-determinism; the earlier run used a different environment).
 
 | Experiment | Metric | Result |
 |---|---|---|
