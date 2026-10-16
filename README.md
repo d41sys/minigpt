@@ -68,7 +68,7 @@ needs internet and the extras:
 All numbers come from one run on an Apple-silicon Mac (`device=mps`), seed 0, with the
 CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, BPE vocab 1024.
 
-All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), which is GPU (MPS) non-determinism during preference-pair sampling and training.
+All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), most likely GPU (MPS) non-determinism in training (not verified).
 
 | Experiment | Metric | Result |
 |---|---|---|
@@ -141,7 +141,16 @@ SFT sample on a held-out instruction (greedy):
 How to read these results:
 - **Overfitting.** About 414k training tokens is small for 5M params. Val loss bottoms out at step 800 and rises after that while train loss keeps falling. The checkpoint keeps the best-val weights, so every downstream stage starts from step 800.
 - **SFT.** The model learns the response *format*: short declarative answers that reuse words from the instruction. It cannot learn facts or arithmetic, because it was pretrained only on Shakespeare.
-- **DPO.** It learns the preference: reward accuracy reaches 0.94 and the loss falls from exactly log 2. But held-out token F1 does not improve (SFT 0.057, DPO 0.054; judge 1.10 vs 1.08). The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs. This matches the known DPO failure mode: it optimises likelihood margins, not answer quality. The number is reported as measured.
+- **DPO.** It learns the preference: reward accuracy rises with β and the loss always starts at exactly log 2. Held-out quality does not move beyond noise. β sweep (`minigpt dpo --beta B --out runs/dpo_bB/ckpt.pt`, then `minigpt eval --checkpoints ...`):
+
+  | Checkpoint | DPO loss (epoch 2) | Reward acc. | Token F1 (n=50) | Judge (1-5) |
+  |---|---|---|---|---|
+  | sft | – | – | 0.057 | 1.10 |
+  | dpo β=0.05 | 0.386 | 0.923 | 0.035 | 1.04 |
+  | dpo β=0.1 | 0.243 | 0.940 | 0.054 | 1.08 |
+  | dpo β=0.5 | 0.051 | 0.977 | 0.058 | 1.14 |
+
+  A judge difference of 0.04 is two of 50 answers moving up one rubric point, so none of the DPO rows is distinguishable from SFT; β=0.05 is the only one visibly below. The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs: it optimises likelihood margins, not answer quality. Reported as measured.
 
 ## Design decisions
 

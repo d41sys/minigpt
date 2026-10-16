@@ -244,8 +244,9 @@ def cmd_dpo(args: argparse.Namespace) -> None:
             f"epoch {int(row['epoch'])} mean dpo_loss {row['dpo_loss']:.4f} "
             f"reward_accuracy {row['reward_accuracy']:.3f}"
         )
-    save_checkpoint(DPO_CKPT, policy, None, step=args.epochs, val_loss=res["final_loss"])
-    print(f"checkpoint -> {DPO_CKPT}")
+    out = Path(args.out)
+    save_checkpoint(out, policy, None, step=args.epochs, val_loss=res["final_loss"])
+    print(f"checkpoint -> {out}")
 
 
 SHORT_ANSWER_MAX_WORDS = 5  # held-out rows with references this short form the EM set
@@ -265,7 +266,13 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
     print("\n| Model | Perplexity | EM | Token F1 | Judge (1-5) | Aggregate |")
     print("|---|---|---|---|---|---|")
-    for name, ckpt in (("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)):
+    checkpoints = [("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)]
+    if args.checkpoints:
+        checkpoints = [
+            (name, Path(path))
+            for name, path in (item.split("=", 1) for item in args.checkpoints.split(","))
+        ]
+    for name, ckpt in checkpoints:
         if not ckpt.exists():
             print(f"| {name} | not run: {ckpt} missing | | | | |")
             continue
@@ -355,6 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--epochs", type=int, default=2)
     s.add_argument("--lr", type=float, default=1e-5)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default=str(DPO_CKPT))
     s.set_defaults(func=cmd_dpo)
 
     s = sub.add_parser("eval", help="perplexity + EM + token F1 + mock judge, weighted")
@@ -363,6 +371,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--w-em", type=float, default=0.25)
     s.add_argument("--w-f1", type=float, default=0.25)
     s.add_argument("--w-judge", type=float, default=0.25)
+    s.add_argument(
+        "--checkpoints",
+        default=None,
+        help="comma-separated name=path list (default: pretrain, sft, dpo)",
+    )
     s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("generate", help="sample text")
