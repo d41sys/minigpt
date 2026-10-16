@@ -21,6 +21,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
 | Eval | `evaluate.py` | perplexity, exact match, token F1, `Judge` protocol with an offline `MockJudge` (1-5), weighted `EvalReport` |
+| Prices | `price_data.py`, `price_model.py`, `price_eval.py` | Dutch day-ahead price forecasting: the same transformer blocks on continuous inputs, vs naive and ridge baselines, rolling-origin folds, bootstrap CI and Diebold-Mariano test |
 
 ## Architecture
 
@@ -156,6 +157,69 @@ How to read these results:
   | β=0.5, seed 0 | 0.051 | 0.977 | 0.058 | 1.14 |
 
   A repeat of β=0.1 seed 0 reproduced every number exactly, so runs are deterministic at a fixed seed. Changing only the seed moves token F1 over 0.042–0.054. β=0.5 (0.058) is within 0.001 of SFT, and only β=0.05 (0.035) falls below the seed range. No β improves on SFT. The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs: it optimises likelihood margins, not answer quality. Reported as measured.
+
+## Day-ahead electricity price forecasting
+
+**Verdict: the transformer beats the best baseline (ridge on lags), by 1.41 EUR/MWh pooled MAE (6%); the gain is modest and mostly comes from averaging 5 seeds.**
+
+Task: at 12:00 on day D-1, forecast the 24 hourly NL day-ahead prices of day D (EUR/MWh) from the previous 7 days of prices. Every hour of D-1 is already public at that time, because the D-1 auction clears on D-2 around 13:00. Nothing at or after D 00:00 enters an input; `tests/test_minigpt_price.py` proves this two ways (inputs equal unix timestamps and all are before D 00:00 local, and overwriting every price from day k onward leaves the inputs of windows up to day k unchanged).
+
+```bash
+uv run minigpt price-data                  # ~5 min, rate limit is 2 requests/min; cached in data/raw/
+uv run minigpt price-train --folds 12      # 12 monthly folds x 5 seeds, 10 min on MPS
+uv run minigpt price-eval --folds 12       # prints the tables below, writes runs/price/report.json
+```
+
+Data: [Energy-Charts API](https://api.energy-charts.info/) (Fraunhofer ISE), `/price?bzn=NL`, no token. Licence CC BY 4.0, data credited to Bundesnetzagentur | SMARD.de. Citation: *Energy-Charts API, Fraunhofer ISE, day-ahead prices, bidding zone NL, CC BY 4.0.* Range 2024-10-01 to 2026-10-15 (745 days), fetched 2026-10-16. `price-data` fixes the range, so a re-run fetches the same data.
+
+- **15-minute switch.** The day-ahead market moved from hourly to 15-minute products on 2025-10-01. Quarter-hours are averaged to hourly; an hour is kept only if all four are present. Pre-cutover data are native hourly prices.
+- **DST.** Days are Europe/Amsterdam calendar days with 24 local hours. On the 25-hour day the two 02:00 hours are averaged; on the 23-hour day 02:00 is imputed from 01:00 and 03:00 (4 such hours in this range, none in a test month).
+- **Gaps.** No hour was missing, so all 738 possible windows exist. A window is dropped if any value it uses is missing; nothing is interpolated.
+- **Exogenous features: skipped.** Energy-Charts offers load, wind and solar forecasts, but I could not establish when each historical forecast was issued, and a forecast from after 12:00 on D-1 would leak. Inputs are prices and calendar (hour, weekday) only. No holiday calendar.
+
+**Model.** `PriceTransformer` reuses `TransformerBlock` (causal attention + GELU MLP) and the GPT init from `model.py` unchanged. It drops `GPTModel`'s token embedding and weight-tied LM head and puts a linear projection of 6 continuous features plus a learned position embedding in front, and a linear regression head behind. The sequence is 168 history tokens (D-7..D-1) followed by 24 query tokens for D. The query tokens carry no price, only calendar features, so the causal mask cannot leak the target. Prices are standardised per window (mean and std of the 168 history hours) and the loss is L1 in EUR/MWh. 2 layers, d=64, 4 heads, dropout 0.1, 112,897 parameters, AdamW with cosine LR, early stopping on validation MAE. Each fold trains 5 seeds (about 10 s each on MPS) and the forecast is their mean.
+
+**Baselines.** Seasonal naive (same hour D-1), weekly naive (same hour D-7), and multi-output ridge on the same 168 normalised lags plus a weekday one-hot (alpha picked on validation from 0.1 to 1000).
+
+**Protocol.** 12 consecutive monthly test folds, 2025-10 to 2026-09 (the last full month is the single held-out month asked for in the brief). For each fold, validation is the 28 days before the test month and training is everything before that; the model is retrained per fold and never refit on validation data. MAE, RMSE and sMAPE are over all test hours.
+
+| Fold | Days | Source res. | 15-min train days | seasonal naive (D-1) | weekly naive (D-7) | ridge on lags | transformer |
+|---|---|---|---|---|---|---|---|
+| 2025-10 | 31 | 15-min | 0/330 | 25.69 | 38.37 | 20.43 | 21.22 |
+| 2025-11 | 30 | 15-min | 3/361 | 21.63 | 27.33 | 17.68 | 17.18 |
+| 2025-12 | 31 | 15-min | 33/391 | 18.12 | 22.03 | 13.31 | 12.45 |
+| 2026-01 | 31 | 15-min | 64/422 | 21.22 | 23.75 | 17.87 | 17.26 |
+| 2026-02 | 28 | 15-min | 95/453 | 15.34 | 18.69 | 12.81 | 11.90 |
+| 2026-03 | 31 | 15-min | 123/481 | 37.56 | 41.26 | 26.05 | 26.21 |
+| 2026-04 | 30 | 15-min | 154/512 | 30.24 | 43.44 | 27.17 | 23.91 |
+| 2026-05 | 31 | 15-min | 184/542 | 24.86 | 34.22 | 25.27 | 22.10 |
+| 2026-06 | 30 | 15-min | 215/573 | 40.63 | 39.70 | 36.19 | 30.23 |
+| 2026-07 | 31 | 15-min | 245/603 | 24.66 | 31.95 | 20.32 | 20.59 |
+| 2026-08 | 31 | 15-min | 276/634 | 25.81 | 31.59 | 21.65 | 20.77 |
+| 2026-09 | 30 | 15-min | 307/665 | 44.24 | 51.20 | 32.99 | 30.87 |
+
+Per-fold MAE in EUR/MWh. Every test month is in the 15-minute era, so fold 2025-10 trains on hourly-era data only and is tested on hourly means of 15-minute prices; the "15-min train days" column shows how that mix shifts across folds.
+
+Pooled over 365 days (8,760 hours):
+
+| Model | MAE | RMSE | sMAPE % |
+|---|---|---|---|
+| seasonal naive (D-1) | 27.53 | 44.87 | 41.7 |
+| weekly naive (D-7) | 33.68 | 53.11 | 48.2 |
+| ridge on lags | 22.66 | 35.82 | 34.9 |
+| transformer (5-seed mean) | **21.25** | **35.53** | **33.9** |
+
+- Per-day MAE, transformer minus ridge (best baseline by pooled MAE): **-1.41 EUR/MWh**, 95% paired-bootstrap CI [-2.59, -0.28] (365 days, 10,000 resamples).
+- Diebold-Mariano with the Harvey-Leybourne-Newbold correction on the same daily differences (h=1): statistic -2.41, p = 0.016. The transformer has the lower MAE in 9 of 12 folds.
+- Verdict rule: "beats" needs DM p < 0.05 and a bootstrap CI that excludes zero in the same direction; otherwise "ties".
+
+Caveats:
+- **Ensemble vs single model.** The 5 individual seeds average a pooled MAE of 22.18 (range 21.79 to 22.62), only 0.48 below ridge. I did not test that single-model gap; most of the margin is ensembling, and ridge is not ensembled.
+- **Dependence.** Both tests treat days as exchangeable (bootstrap) or use no autocorrelation correction at h=1 (DM). Adjacent days are correlated, so the CI and p-value are probably somewhat optimistic. Folds are not independent either.
+- **Small models, small data.** 330 to 665 training days, one hyperparameter setting, one price regime. I probed four variants (d=32, dropout 0.2, 1 layer, lower LR) on one 28-day validation window; none was clearly better, so the defaults stayed. That window (Aug 2026) is also the test month of fold 2026-08, so treat that fold as very slightly less clean.
+- **sMAPE** is unreliable here: 435 of the 8,760 test hours have a negative price and 526 have |price| < 5 EUR/MWh, where a small EUR error becomes a huge percentage. Use MAE and RMSE.
+- **Weak spots.** Errors are largest in months with high price volatility (2026-03, 2026-06, 2026-09). Single country, no exogenous inputs, no real-time or intraday evaluation.
+- **Reproducibility.** Seeds are fixed. A second full `price-train --folds 12` then `price-eval --folds 12` on the same Mac (MPS) reproduced every number above exactly; other devices may differ in the last digits.
 
 ## Design decisions
 

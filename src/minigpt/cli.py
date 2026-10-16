@@ -1,4 +1,4 @@
-"""minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, eval, generation.
+"""minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, eval, generation, prices.
 
 Pipeline: `pretrain` writes runs/pretrain/ckpt.pt; `finetune-cls` and `sft` start from it;
 `dpo` starts from runs/sft/ckpt.pt; `eval` reports on whatever checkpoints exist.
@@ -10,7 +10,9 @@ import argparse
 import json
 import random
 import sys
+import time
 import urllib.request
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,18 @@ from minigpt.finetune_cls import (
     train_classifier,
 )
 from minigpt.model import GPTConfig, GPTModel
+from minigpt.price_data import (
+    CITATION,
+    DEFAULT_END,
+    DEFAULT_START,
+    fetch_prices,
+    fold_months,
+    last_full_month,
+    load_price_data,
+    split_windows,
+)
+from minigpt.price_eval import evaluate_fold, format_summary, month_label, summarize
+from minigpt.price_model import PriceConfig, TrainConfig, train_ensemble
 from minigpt.sft import (
     SFTDataset,
     download_alpaca_data,
@@ -62,6 +76,7 @@ PRETRAIN_CKPT = Path("runs/pretrain/ckpt.pt")
 SFT_CKPT = Path("runs/sft/ckpt.pt")
 DPO_CKPT = Path("runs/dpo/ckpt.pt")
 SFT_HELDOUT = 100  # last N Alpaca rows are never trained on
+PRICE_DIR = Path("runs/price")
 
 
 def seed_everything(seed: int) -> None:
@@ -339,6 +354,70 @@ def cmd_generate(args: argparse.Namespace) -> None:
     print(tok.decode(out[0].tolist()))
 
 
+def cmd_price_data(args: argparse.Namespace) -> None:
+    out = fetch_prices(date.fromisoformat(args.start), date.fromisoformat(args.end), Path(args.dir))
+    data = load_price_data(Path(args.dir))
+    print(
+        f"NL day-ahead prices {data.manifest['start']} to {data.manifest['end']} "
+        f"(fetched {data.manifest['fetched_on']}) in {out}\n"
+        f"complete forecast windows: {len(data.windows)} of {len(data.table.dates)} days; "
+        f"partial hours dropped: {data.partial_hours_dropped}; "
+        f"DST hours adjusted: {data.table.dst_adjusted}; 15-min source from: {data.cutover}\n"
+        f"{CITATION}"
+    )
+
+
+def _fold_list(data_last_day: date, folds: int) -> list[tuple[int, int]]:
+    return fold_months(last_full_month(data_last_day), folds)
+
+
+def cmd_price_train(args: argparse.Namespace) -> None:
+    device = get_device()
+    data = load_price_data(Path(args.dir))
+    cfg = PriceConfig()
+    tcfg = TrainConfig(epochs=args.epochs, patience=args.patience, seeds=args.seeds)
+    t_all = time.time()
+    for month in _fold_list(data.last_day, args.folds):
+        split = split_windows(data.windows, month, args.val_days)
+        print(
+            f"== fold {month_label(month)}: train {len(split.train)} days "
+            f"(to {split.train.dates[-1]}), val {len(split.val)}, test {len(split.test)}, "
+            f"device={device}"
+        )
+        ckpt = train_ensemble(split.train, split.val, cfg, tcfg, device)
+        ckpt.update(
+            test_month=month_label(month), val_days=args.val_days, data_end=data.manifest["end"]
+        )
+        out = Path(args.out_root) / month_label(month) / "ckpt.pt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(ckpt, out)
+        print(f"saved {out}")
+    print(f"total training time {time.time() - t_all:.0f}s")
+
+
+def cmd_price_eval(args: argparse.Namespace) -> None:
+    device = get_device()
+    data = load_price_data(Path(args.dir))
+    results = []
+    for month in _fold_list(data.last_day, args.folds):
+        path = require(
+            Path(args.out_root) / month_label(month) / "ckpt.pt", "price-train --folds N"
+        )
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        results.append(evaluate_fold(data.windows, month, ckpt, device, data.cutover))
+    summary = summarize(results)
+    summary["data"] = {
+        "start": data.manifest["start"],
+        "end": data.manifest["end"],
+        "fetched_on": data.manifest["fetched_on"],
+        "source_15min_from": str(data.cutover),
+    }
+    print(format_summary(summary))
+    report = Path(args.out_root) / "report.json"
+    report.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\nwrote {report}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="minigpt", description="GPT from scratch.")
     sub = p.add_subparsers(dest="command", required=True)
@@ -416,6 +495,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated name=path list (default: pretrain, sft, dpo)",
     )
     s.set_defaults(func=cmd_eval)
+
+    s = sub.add_parser("price-data", help="download NL day-ahead prices (Energy-Charts)")
+    s.add_argument("--start", default=DEFAULT_START.isoformat())
+    s.add_argument("--end", default=DEFAULT_END.isoformat())
+    s.add_argument("--dir", default=str(RAW_DIR))
+    s.set_defaults(func=cmd_price_data)
+
+    s = sub.add_parser("price-train", help="train the price transformer, one model set per fold")
+    s.add_argument("--folds", type=int, default=1, help="last N full months, each its own fold")
+    s.add_argument("--seeds", type=int, default=5)
+    s.add_argument("--epochs", type=int, default=80)
+    s.add_argument("--patience", type=int, default=15)
+    s.add_argument("--val-days", type=int, default=28)
+    s.add_argument("--dir", default=str(RAW_DIR))
+    s.add_argument("--out-root", default=str(PRICE_DIR))
+    s.set_defaults(func=cmd_price_train)
+
+    s = sub.add_parser("price-eval", help="rolling-origin eval vs baselines (needs price-train)")
+    s.add_argument("--folds", type=int, default=12, help="last N full months")
+    s.add_argument("--dir", default=str(RAW_DIR))
+    s.add_argument("--out-root", default=str(PRICE_DIR))
+    s.set_defaults(func=cmd_price_eval)
 
     s = sub.add_parser("generate", help="sample text")
     s.add_argument("--prompt", default="ROMEO:")
