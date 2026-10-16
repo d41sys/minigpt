@@ -20,7 +20,14 @@ from torch.utils.data import DataLoader
 from minigpt.bpe import BPETokenizer
 from minigpt.data import create_dataloader
 from minigpt.dpo import PreferenceDataset, generate_preference_pairs, train_dpo
-from minigpt.evaluate import RougeLJudge, compute_perplexity, evaluate_responses
+from minigpt.evaluate import (
+    EvalReport,
+    Judge,
+    MockJudge,
+    compute_perplexity,
+    exact_match,
+    token_f1,
+)
 from minigpt.finetune_cls import (
     GPTForClassification,
     SpamTextDataset,
@@ -241,31 +248,49 @@ def cmd_dpo(args: argparse.Namespace) -> None:
     print(f"checkpoint -> {DPO_CKPT}")
 
 
+SHORT_ANSWER_MAX_WORDS = 5  # held-out rows with references this short form the EM set
+
+
 def cmd_eval(args: argparse.Namespace) -> None:
+    """Lesson-41 report: perplexity, exact match, token F1, mock judge, weighted aggregate."""
     device = get_device()
     tok = load_tokenizer()
-    if PRETRAIN_CKPT.exists():
-        model = load_model(PRETRAIN_CKPT).to(device)
-        _, val_ids = shakespeare_splits(tok)
-        loader = create_dataloader(val_ids, model.config.context_length, 16, shuffle=False)
-        print(f"pretrain  val perplexity={compute_perplexity(model, loader, device):.2f}")
-    heldout = load_alpaca()[-SFT_HELDOUT:][: args.n]
-    judge = RougeLJudge()
+    _, val_ids = shakespeare_splits(tok)
+    heldout = load_alpaca()[-SFT_HELDOUT:]
+    short = [r for r in heldout if len(r["output"].split()) <= SHORT_ANSWER_MAX_WORDS]
+    open_form = heldout[: args.n]
+    judge: Judge = MockJudge()
+    weights = (args.w_ppl, args.w_em, args.w_f1, args.w_judge)
+
+    print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
+    print("\n| Model | Perplexity | EM | Token F1 | Judge (1-5) | Aggregate |")
+    print("|---|---|---|---|---|---|")
     for name, ckpt in (("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)):
         if not ckpt.exists():
-            print(f"{name:9s} not run: {ckpt} missing")
+            print(f"| {name} | not run: {ckpt} missing | | | | |")
             continue
         model = load_model(ckpt).to(device)
-        samples = [
-            {
-                "instruction": r["instruction"],
-                "response": sample_response(model, tok, r, device),
-                "reference": r["output"],
-            }
-            for r in heldout
+        loader = create_dataloader(val_ids, model.config.context_length, 16, shuffle=False)
+        em = [exact_match(sample_response(model, tok, r, device), r["output"]) for r in short]
+        responses = [sample_response(model, tok, r, device) for r in open_form]
+        f1 = [token_f1(p, r["output"]) for p, r in zip(responses, open_form, strict=True)]
+        scores = [
+            judge.score(r["instruction"], p, r["output"])
+            for p, r in zip(responses, open_form, strict=True)
         ]
-        score = evaluate_responses(judge, samples)["mean_rouge_l_f1"]
-        print(f"{name:9s} heldout ROUGE-L F1={score:.4f} (n={len(samples)})")
+        report = EvalReport(
+            perplexity=compute_perplexity(model, loader, device),
+            vocab_size=model.config.vocab_size,
+            exact_match=sum(em) / max(1, len(em)),
+            exact_match_n=len(em),
+            token_f1=sum(f1) / max(1, len(f1)),
+            judge_mean=sum(scores) / max(1, len(scores)),
+            open_n=len(open_form),
+        )
+        print(
+            f"| {name} | {report.perplexity:.2f} | {report.exact_match:.3f} | "
+            f"{report.token_f1:.3f} | {report.judge_mean:.2f} | {report.aggregate(weights):.3f} |"
+        )
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -332,8 +357,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     s.set_defaults(func=cmd_dpo)
 
-    s = sub.add_parser("eval", help="perplexity + held-out ROUGE-L")
-    s.add_argument("--n", type=int, default=50, help="held-out Alpaca rows to judge")
+    s = sub.add_parser("eval", help="perplexity + EM + token F1 + mock judge, weighted")
+    s.add_argument("--n", type=int, default=50, help="held-out Alpaca rows for F1 and judge")
+    s.add_argument("--w-ppl", type=float, default=0.25)
+    s.add_argument("--w-em", type=float, default=0.25)
+    s.add_argument("--w-f1", type=float, default=0.25)
+    s.add_argument("--w-judge", type=float, default=0.25)
     s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("generate", help="sample text")

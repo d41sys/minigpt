@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+import re
+from collections import Counter
+from dataclasses import dataclass
 from typing import Protocol
 
 import torch
@@ -58,10 +60,10 @@ def compute_perplexity(
 
 
 class Judge(Protocol):
-    """Protocol for LLM-as-a-judge or automated response evaluation."""
+    """LLM-as-a-judge interface: a 1-5 rubric score for one response."""
 
-    def judge(self, instruction: str, response: str, reference: str) -> dict[str, float]:
-        """Score candidate response against reference."""
+    def score(self, instruction: str, response: str, reference: str) -> int:
+        """Return 1 (unusable) to 5 (matches the reference)."""
         ...
 
 
@@ -104,26 +106,79 @@ class RougeLJudge:
         }
 
 
-def evaluate_responses(
-    judge: Judge,
-    samples: Sequence[dict[str, str]],
-) -> dict[str, float]:
-    """Evaluate candidate responses over a dataset of samples."""
-    scores: list[dict[str, float]] = []
-    for s in samples:
-        sc = judge.judge(
-            instruction=s.get("instruction", ""),
-            response=s.get("response", ""),
-            reference=s.get("reference", ""),
+# --- Lesson 41: exact match, token F1, mock judge, weighted report -----------------
+
+_ARTICLES = re.compile(r"\b(a|an|the)\b")
+_PUNCT = re.compile(r"[^\w\s]")
+
+
+def normalize_answer(text: str) -> str:
+    """SQuAD-style normalisation: lowercase, drop punctuation and articles, squash spaces."""
+    text = _PUNCT.sub(" ", text.lower())
+    text = _ARTICLES.sub(" ", text)
+    return " ".join(text.split())
+
+
+def exact_match(prediction: str, reference: str) -> float:
+    """1.0 if the normalised strings are identical, else 0.0."""
+    return float(normalize_answer(prediction) == normalize_answer(reference))
+
+
+def token_f1(prediction: str, reference: str) -> float:
+    """Multiset token F1 between normalised prediction and reference."""
+    pred = normalize_answer(prediction).split()
+    ref = normalize_answer(reference).split()
+    if not pred or not ref:
+        return float(pred == ref)
+    overlap = sum((Counter(pred) & Counter(ref)).values())
+    if overlap == 0:
+        return 0.0
+    precision, recall = overlap / len(pred), overlap / len(ref)
+    return 2 * precision * recall / (precision + recall)
+
+
+class MockJudge:
+    """Offline stand-in for an LLM judge: maps ROUGE-L F1 onto a 1-5 rubric score.
+
+    It is deterministic and needs no network, so the eval loop runs anywhere. It is a
+    lexical proxy, not a quality judgement; swap in a real judge behind the same method.
+    """
+
+    def score(self, instruction: str, response: str, reference: str) -> int:
+        """Return 1 (unusable) to 5 (matches the reference)."""
+        if not response.strip():
+            return 1
+        f1 = RougeLJudge().judge(instruction, response, reference)["rouge_l_f1"]
+        return 1 + min(4, int(f1 * 5))
+
+
+@dataclass(frozen=True)
+class EvalReport:
+    """Per-model results of the four evals plus a weighted aggregate in [0, 1]."""
+
+    perplexity: float
+    vocab_size: int
+    exact_match: float
+    exact_match_n: int
+    token_f1: float
+    judge_mean: float
+    open_n: int
+
+    @property
+    def perplexity_score(self) -> float:
+        """1 at perplexity 1, 0 at uniform guessing over the vocabulary."""
+        if not math.isfinite(self.perplexity):
+            return 0.0
+        if self.perplexity <= 1.0:
+            return 1.0
+        return max(0.0, 1.0 - math.log(self.perplexity) / math.log(self.vocab_size))
+
+    def aggregate(self, weights: tuple[float, float, float, float] = (0.25,) * 4) -> float:
+        """Weighted mean of (perplexity score, EM, token F1, judge rescaled to [0, 1])."""
+        parts = (
+            self.perplexity_score,
+            self.exact_match,
+            self.token_f1,
+            (self.judge_mean - 1.0) / 4.0,
         )
-        scores.append(sc)
-
-    if not scores:
-        return {}
-
-    keys = scores[0].keys()
-    aggregated: dict[str, float] = {}
-    for k in keys:
-        aggregated[f"mean_{k}"] = sum(s[k] for s in scores) / len(scores)
-
-    return aggregated
+        return sum(w * p for w, p in zip(weights, parts, strict=True)) / sum(weights)

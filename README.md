@@ -20,7 +20,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
-| Eval | `evaluate.py` | perplexity, classification metrics, `Judge` protocol with offline ROUGE-L default |
+| Eval | `evaluate.py` | perplexity, exact match, token F1, `Judge` protocol with an offline `MockJudge` (1-5), weighted `EvalReport` |
 
 ## Architecture
 
@@ -42,7 +42,7 @@ flowchart LR
     CK --> CLS[finetune-cls<br/>SMS Spam]
     CK --> SFT[sft<br/>Alpaca 900] --> SCK[(runs/sft/ckpt.pt)]
     SCK --> GEN[sample 300 rejected answers] --> DPO[dpo vs frozen SFT ref]
-    SCK & DPO --> EV[eval: ppl + held-out ROUGE-L]
+    SCK & DPO --> EV[eval: ppl + EM + token F1 + judge, weighted]
 ```
 
 ## Quickstart
@@ -68,6 +68,8 @@ needs internet and the extras:
 All numbers come from one run on an Apple-silicon Mac (`device=mps`), seed 0, with the
 CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, BPE vocab 1024.
 
+All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), which is GPU (MPS) non-determinism during preference-pair sampling and training.
+
 | Experiment | Metric | Result |
 |---|---|---|
 | BPE on tiny-Shakespeare | vocab / compression | 1024 tokens, 2.41 bytes/token (17 s to train) |
@@ -75,10 +77,30 @@ CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, 
 | Pretrain | val perplexity (best ckpt) | 40.27 |
 | SMS Spam, head swap (790,786 trainable params) | test accuracy / F1 (n=300) | **0.940** / 0.939 (precision 0.965, recall 0.914) |
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
-| DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2314; reward accuracy 0.95 |
-| Held-out Alpaca (50 rows, greedy) | ROUGE-L F1, pretrain / SFT / DPO | 0.064 / 0.095 / 0.076 |
+| DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 19 passed, 1 deselected (network) in 2.5 s |
+| Unit tests | `pytest` | 25 passed, 1 deselected (network) in 1.8 s |
+
+### Evaluation pipeline (course lesson 41)
+
+`minigpt eval` runs four evals on every checkpoint and combines them into one weighted score:
+
+- **Perplexity** on the tiny-Shakespeare validation split, mapped to [0, 1] as `1 − ln(ppl) / ln(vocab)` (1 = perfect, 0 = uniform guessing).
+- **Exact match** (SQuAD normalisation) on held-out Alpaca rows whose reference has ≤ 5 words (12 rows).
+- **Token F1** on the first 50 held-out Alpaca rows.
+- **Mock judge** (1–5) on the same 50 rows. `MockJudge` maps ROUGE-L F1 onto the rubric; it is an offline stand-in behind the `Judge` protocol, not a quality judgement.
+
+Weights default to 0.25 each (`--w-ppl --w-em --w-f1 --w-judge`).
+
+| Model | Perplexity | EM (n=12) | Token F1 (n=50) | Judge (1-5) | Aggregate |
+|---|---|---|---|---|---|
+| pretrain | 40.27 | 0.000 | 0.048 | 1.00 | 0.129 |
+| sft | 93.31 | 0.000 | 0.057 | 1.10 | 0.107 |
+| dpo | 89.33 | 0.000 | 0.054 | 1.08 | 0.107 |
+
+Reading, as measured:
+- A 5M-parameter model trained on 900 instructions gets no exact match and near-floor F1. SFT and DPO are slightly above pretrain on F1 and judge.
+- **The aggregate ranks pretrain first, which is a weighting artefact.** Perplexity is measured on Shakespeare; SFT moves the model away from that domain (40 → 93), and the perplexity term outweighs the small F1/judge gains. A per-task report is printed for exactly this reason: the single number hides which trade-off is being made.
 
 Pretrain log (excerpt):
 
@@ -119,7 +141,7 @@ SFT sample on a held-out instruction (greedy):
 How to read these results:
 - **Overfitting.** About 414k training tokens is small for 5M params. Val loss bottoms out at step 800 and rises after that while train loss keeps falling. The checkpoint keeps the best-val weights, so every downstream stage starts from step 800.
 - **SFT.** The model learns the response *format*: short declarative answers that reuse words from the instruction. It cannot learn facts or arithmetic, because it was pretrained only on Shakespeare.
-- **DPO.** It learns the preference: reward accuracy reaches 0.95 and the loss falls from exactly log 2. But held-out ROUGE-L drops from SFT's 0.095 to 0.076. The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs. This matches the known DPO failure mode: it optimises likelihood margins, not answer quality. The number is reported as measured.
+- **DPO.** It learns the preference: reward accuracy reaches 0.94 and the loss falls from exactly log 2. But held-out token F1 does not improve (SFT 0.057, DPO 0.054; judge 1.10 vs 1.08). The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs. This matches the known DPO failure mode: it optimises likelihood margins, not answer quality. The number is reported as measured.
 
 ## Design decisions
 
