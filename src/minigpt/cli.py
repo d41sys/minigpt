@@ -57,7 +57,12 @@ from minigpt.price_data import (
     split_windows,
 )
 from minigpt.price_eval import evaluate_fold, format_summary, month_label, summarize
-from minigpt.price_model import PriceConfig, TrainConfig, train_ensemble
+from minigpt.price_model import QUANTILES, PriceConfig, TrainConfig, train_ensemble
+from minigpt.price_quantile import (
+    evaluate_quantile_fold,
+    format_quantile_summary,
+    summarize_quantile,
+)
 from minigpt.sft import (
     SFTDataset,
     download_alpaca_data,
@@ -77,6 +82,7 @@ SFT_CKPT = Path("runs/sft/ckpt.pt")
 DPO_CKPT = Path("runs/dpo/ckpt.pt")
 SFT_HELDOUT = 100  # last N Alpaca rows are never trained on
 PRICE_DIR = Path("runs/price")
+PRICE_Q_DIR = Path("runs/price_q")
 
 
 def seed_everything(seed: int) -> None:
@@ -371,10 +377,10 @@ def _fold_list(data_last_day: date, folds: int) -> list[tuple[int, int]]:
     return fold_months(last_full_month(data_last_day), folds)
 
 
-def cmd_price_train(args: argparse.Namespace) -> None:
+def _train_price_folds(args: argparse.Namespace, quantiles: tuple[float, ...] | None) -> None:
     device = get_device()
     data = load_price_data(Path(args.dir))
-    cfg = PriceConfig()
+    cfg = PriceConfig(n_quantiles=1 if quantiles is None else len(quantiles))
     tcfg = TrainConfig(epochs=args.epochs, patience=args.patience, seeds=args.seeds)
     t_all = time.time()
     for month in _fold_list(data.last_day, args.folds):
@@ -384,7 +390,7 @@ def cmd_price_train(args: argparse.Namespace) -> None:
             f"(to {split.train.dates[-1]}), val {len(split.val)}, test {len(split.test)}, "
             f"device={device}"
         )
-        ckpt = train_ensemble(split.train, split.val, cfg, tcfg, device)
+        ckpt = train_ensemble(split.train, split.val, cfg, tcfg, device, quantiles)
         ckpt.update(
             test_month=month_label(month), val_days=args.val_days, data_end=data.manifest["end"]
         )
@@ -393,6 +399,14 @@ def cmd_price_train(args: argparse.Namespace) -> None:
         torch.save(ckpt, out)
         print(f"saved {out}")
     print(f"total training time {time.time() - t_all:.0f}s")
+
+
+def cmd_price_train(args: argparse.Namespace) -> None:
+    _train_price_folds(args, None)
+
+
+def cmd_price_quantile_train(args: argparse.Namespace) -> None:
+    _train_price_folds(args, QUANTILES)
 
 
 def cmd_price_eval(args: argparse.Namespace) -> None:
@@ -413,6 +427,29 @@ def cmd_price_eval(args: argparse.Namespace) -> None:
         "source_15min_from": str(data.cutover),
     }
     print(format_summary(summary))
+    report = Path(args.out_root) / "report.json"
+    report.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\nwrote {report}")
+
+
+def cmd_price_quantile_eval(args: argparse.Namespace) -> None:
+    device = get_device()
+    data = load_price_data(Path(args.dir))
+    results = []
+    for month in _fold_list(data.last_day, args.folds):
+        path = require(
+            Path(args.out_root) / month_label(month) / "ckpt.pt", "price-quantile-train --folds N"
+        )
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        results.append(evaluate_quantile_fold(data.windows, month, ckpt, device, data.cutover))
+    summary = summarize_quantile(results)
+    summary["data"] = {
+        "start": data.manifest["start"],
+        "end": data.manifest["end"],
+        "fetched_on": data.manifest["fetched_on"],
+        "source_15min_from": str(data.cutover),
+    }
+    print(format_quantile_summary(summary))
     report = Path(args.out_root) / "report.json"
     report.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\nwrote {report}")
@@ -512,11 +549,33 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out-root", default=str(PRICE_DIR))
     s.set_defaults(func=cmd_price_train)
 
+    s = sub.add_parser(
+        "price-quantile-train",
+        help="train the quantile (pinball) price transformer, one model set per fold",
+    )
+    s.add_argument("--folds", type=int, default=1, help="last N full months, each its own fold")
+    s.add_argument("--seeds", type=int, default=5)
+    s.add_argument("--epochs", type=int, default=80)
+    s.add_argument("--patience", type=int, default=15)
+    s.add_argument("--val-days", type=int, default=28)
+    s.add_argument("--dir", default=str(RAW_DIR))
+    s.add_argument("--out-root", default=str(PRICE_Q_DIR))
+    s.set_defaults(func=cmd_price_quantile_train)
+
     s = sub.add_parser("price-eval", help="rolling-origin eval vs baselines (needs price-train)")
     s.add_argument("--folds", type=int, default=12, help="last N full months")
     s.add_argument("--dir", default=str(RAW_DIR))
     s.add_argument("--out-root", default=str(PRICE_DIR))
     s.set_defaults(func=cmd_price_eval)
+
+    s = sub.add_parser(
+        "price-quantile-eval",
+        help="rolling-origin probabilistic eval vs quantile baselines (needs price-quantile-train)",
+    )
+    s.add_argument("--folds", type=int, default=12, help="last N full months")
+    s.add_argument("--dir", default=str(RAW_DIR))
+    s.add_argument("--out-root", default=str(PRICE_Q_DIR))
+    s.set_defaults(func=cmd_price_quantile_eval)
 
     s = sub.add_parser("generate", help="sample text")
     s.add_argument("--prompt", default="ROMEO:")

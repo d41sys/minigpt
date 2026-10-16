@@ -33,6 +33,7 @@ from minigpt.price_data import HOURS, LOOKBACK_DAYS, Windows
 
 SD_FLOOR = 1.0  # EUR/MWh; keeps flat history windows from blowing up the scaling
 N_FEATURES = 6  # price, is_query, sin/cos hour of day, sin/cos day of week
+QUANTILES = (0.1, 0.25, 0.5, 0.75, 0.9)  # levels of the probabilistic forecast; 0.1-0.9 = 80% PI
 
 
 def window_stats(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -74,6 +75,7 @@ class PriceConfig:
     num_layers: int = 2
     num_heads: int = 4
     dropout: float = 0.1
+    n_quantiles: int = 1  # 1 = point forecast head; >1 = one output per quantile level
 
     @property
     def context(self) -> int:
@@ -99,7 +101,7 @@ class PriceTransformer(nn.Module):
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList([TransformerBlock(gpt_cfg) for _ in range(cfg.num_layers)])
         self.ln_f = nn.LayerNorm(cfg.d_model)
-        self.head = nn.Linear(cfg.d_model, 1)
+        self.head = nn.Linear(cfg.d_model, cfg.n_quantiles)
         for module in self.modules():  # same init as GPTModel
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -109,13 +111,15 @@ class PriceTransformer(nn.Module):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, feats: torch.Tensor) -> torch.Tensor:
-        """feats (B, T, N_FEATURES) -> normalised forecast (B, 24)."""
+        """feats (B, T, N_FEATURES) -> normalised forecast, (B, 24) or (B, 24, n_quantiles)."""
         pos = torch.arange(feats.size(1), device=feats.device)
         h = self.drop(self.inp(feats) + self.wpe(pos))
         for block in self.blocks:
             h = block(h)
         h = self.ln_f(h)
-        out: torch.Tensor = self.head(h[:, -HOURS:]).squeeze(-1)
+        out: torch.Tensor = self.head(h[:, -HOURS:])
+        if self.cfg.n_quantiles == 1:
+            out = out.squeeze(-1)
         return out
 
 
@@ -130,18 +134,44 @@ class TrainConfig:
 
 
 def _denorm(out: torch.Tensor, mu: torch.Tensor, sd: torch.Tensor) -> torch.Tensor:
+    if out.ndim == 3:  # quantile heads: broadcast the per-window stats over the quantile axis
+        mu, sd = mu.unsqueeze(-1), sd.unsqueeze(-1)
     return out * sd + mu
+
+
+def pinball_loss(pred: np.ndarray, y: np.ndarray, quantiles: tuple[float, ...]) -> np.ndarray:
+    """Pinball (quantile) loss per element, shape of `pred` (..., Q) for `y` (...,).
+
+    With error e = y - pred_q the loss is q * e if e >= 0 and (q - 1) * e otherwise, i.e.
+    max(q * e, (q - 1) * e). Its minimiser is the q-quantile of y.
+    """
+    q = np.asarray(quantiles, dtype=np.float64)
+    err = y[..., None] - pred
+    out: np.ndarray = np.maximum(q * err, (q - 1.0) * err)
+    return out
+
+
+def _pinball_torch(pred: torch.Tensor, y: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    err = y.unsqueeze(-1) - pred
+    return torch.maximum(q * err, (q - 1.0) * err)
 
 
 @torch.no_grad()
 def predict_one(
     model: PriceTransformer, feats: torch.Tensor, x: np.ndarray, device: torch.device
 ) -> np.ndarray:
-    """Forecast in EUR/MWh, shape (N, 24)."""
+    """Forecast in EUR/MWh, shape (N, 24); (N, 24, Q) for a quantile model.
+
+    Quantile outputs are sorted along the last axis, so crossing quantiles never reach the caller
+    (sorting is the standard fix and never raises the pinball loss).
+    """
     model.eval()
     mu, sd = window_stats(x)
     out = model(feats.to(device)).cpu().double().numpy()
-    result: np.ndarray = out * sd + mu
+    if out.ndim == 3:
+        result: np.ndarray = np.sort(out * sd[..., None] + mu[..., None], axis=-1)
+        return result
+    result = out * sd + mu
     return result
 
 
@@ -152,11 +182,19 @@ def train_one(
     tcfg: TrainConfig,
     seed: int,
     device: torch.device,
+    quantiles: tuple[float, ...] | None = None,
 ) -> tuple[dict[str, torch.Tensor], float, int]:
-    """Train one model; keep the epoch with the lowest validation MAE.
+    """Train one model; keep the epoch with the lowest validation score.
 
-    Returns (best state_dict on CPU, best val MAE in EUR/MWh, best epoch).
+    Point model (`quantiles` None): L1 loss, score = validation MAE in EUR/MWh. Quantile model:
+    pinball loss averaged over the levels, score = validation mean pinball in EUR/MWh. The
+    validation window is the 28 days before the test month, as for the point model.
+    Returns (best state_dict on CPU, best val score, best epoch).
     """
+    if (quantiles is None) != (cfg.n_quantiles == 1):
+        raise ValueError("quantiles must be given exactly when cfg.n_quantiles > 1")
+    if quantiles is not None and len(quantiles) != cfg.n_quantiles:
+        raise ValueError(f"{len(quantiles)} quantile levels but n_quantiles={cfg.n_quantiles}")
     torch.manual_seed(seed)
     gen = torch.Generator().manual_seed(seed)
     model = PriceTransformer(cfg).to(device)
@@ -175,7 +213,8 @@ def train_one(
     mu_t = torch.from_numpy(mu).float().to(device)
     sd_t = torch.from_numpy(sd).float().to(device)
     y_t = torch.from_numpy(train.y).float().to(device)
-    scale = float(np.std(train.x))  # global EUR/MWh scale so the L1 loss is O(1)
+    scale = float(np.std(train.x))  # global EUR/MWh scale so the loss is O(1)
+    q_t = None if quantiles is None else torch.tensor(quantiles, dtype=torch.float32, device=device)
     f_train = f_train.to(device)
     n = len(train)
     steps_per_epoch = math.ceil(n / tcfg.batch_size)
@@ -192,13 +231,20 @@ def train_one(
             for g in opt.param_groups:
                 g["lr"] = tcfg.lr * max(lr_mult, 0.05)
             pred = _denorm(model(f_train[idx]), mu_t[idx], sd_t[idx])
-            loss = (pred - y_t[idx]).abs().mean() / scale
+            if q_t is None:
+                loss = (pred - y_t[idx]).abs().mean() / scale
+            else:
+                loss = _pinball_torch(pred, y_t[idx], q_t).mean() / scale
             opt.zero_grad(set_to_none=True)
             loss.backward()  # type: ignore[no-untyped-call]
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             step += 1
-        val_mae = float(np.abs(predict_one(model, f_val, val.x, device) - val.y).mean())
+        val_pred = predict_one(model, f_val, val.x, device)
+        if quantiles is None:
+            val_mae = float(np.abs(val_pred - val.y).mean())
+        else:
+            val_mae = float(pinball_loss(val_pred, val.y, quantiles).mean())
         if val_mae < best_mae:
             best_mae, best_epoch = val_mae, epoch
             best_state = copy.deepcopy({k: v.cpu() for k, v in model.state_dict().items()})
@@ -213,26 +259,31 @@ def train_ensemble(
     cfg: PriceConfig,
     tcfg: TrainConfig,
     device: torch.device,
+    quantiles: tuple[float, ...] | None = None,
 ) -> dict[str, object]:
     """Train `tcfg.seeds` independent models; return a `torch.load(weights_only=True)`-safe dict."""
     states: list[dict[str, torch.Tensor]] = []
-    val_maes: list[float] = []
+    val_scores: list[float] = []
     epochs: list[int] = []
+    unit = "MAE" if quantiles is None else "pinball"
     for seed in range(tcfg.seeds):
         t0 = time.time()
-        state, mae, epoch = train_one(train, val, cfg, tcfg, seed, device)
+        state, score, epoch = train_one(train, val, cfg, tcfg, seed, device, quantiles)
         states.append(state)
-        val_maes.append(mae)
+        val_scores.append(score)
         epochs.append(epoch)
         secs = time.time() - t0
-        print(f"seed {seed}: best val MAE {mae:.2f} EUR/MWh at epoch {epoch} ({secs:.0f}s)")
-    return {
+        print(f"seed {seed}: best val {unit} {score:.2f} EUR/MWh at epoch {epoch} ({secs:.0f}s)")
+    ckpt: dict[str, object] = {
         "config": asdict(cfg),
         "train_config": asdict(tcfg),
         "states": states,
-        "val_mae": val_maes,
+        "val_mae" if quantiles is None else "val_pinball": val_scores,
         "best_epoch": epochs,
     }
+    if quantiles is not None:
+        ckpt["quantiles"] = list(quantiles)
+    return ckpt
 
 
 def load_models(ckpt: dict[str, object], device: torch.device) -> list[PriceTransformer]:
@@ -270,7 +321,7 @@ def weekly_naive(w: Windows) -> np.ndarray:
     return out
 
 
-def _ridge_design(w: Windows) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def lag_design(w: Windows) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Normalised lags + one-hot target weekday; returns (features, mu, sd)."""
     mu, sd = window_stats(w.x)
     onehot = np.eye(7)[target_weekdays(w.dates)]
@@ -284,14 +335,14 @@ class RidgeModel:
     alpha: float
 
     def predict(self, w: Windows) -> np.ndarray:
-        feats, mu, sd = _ridge_design(w)
+        feats, mu, sd = lag_design(w)
         out: np.ndarray = (feats @ self.coef + self.intercept) * sd + mu
         return out
 
 
 def fit_ridge(w: Windows, alpha: float) -> RidgeModel:
     """Multi-output ridge on the same normalised 168 lags (+ weekday one-hot) as the transformer."""
-    feats, mu, sd = _ridge_design(w)
+    feats, mu, sd = lag_design(w)
     y = (w.y - mu) / sd
     fm, ym = feats.mean(axis=0), y.mean(axis=0)
     fc, yc = feats - fm, y - ym

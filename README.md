@@ -231,6 +231,73 @@ Caveats:
 - **Weak spots.** Errors are largest in months with high price volatility (2026-03, 2026-06, 2026-09). Single country, no exogenous inputs, no real-time or intraday evaluation.
 - **Reproducibility.** Seeds are fixed. A second full `price-train --folds 12` then `price-eval --folds 12` on the same Mac (MPS) reproduced every number above exactly; other devices may differ in the last digits.
 
+### Probabilistic forecasts (quantiles)
+
+**Verdict: no significant gain. The 5-seed quantile-transformer ensemble has the lowest pooled mean pinball (7.88 vs 8.17 EUR/MWh for the best baseline, linear quantile regression), but the paired tests cannot separate them (95% CI [-0.66, +0.06], DM-HLN p = 0.112), so it ties. No single seed beats the baseline either. Its 80% interval covers 75.9% of hours, below the nominal 80%.**
+
+Flexibility scheduling needs a forecast distribution, not a point. Same task, inputs, 12 folds and split protocol as above; the target is now five quantiles (0.1, 0.25, 0.5, 0.75, 0.9) per hour. The 0.1 to 0.9 band is the 80% prediction interval.
+
+```bash
+uv run minigpt price-quantile-train --folds 12   # 14 min on MPS; writes runs/price_q/<month>/ckpt.pt
+uv run minigpt price-quantile-eval --folds 12    # 2.5 min; prints the tables below, writes runs/price_q/report.json
+```
+
+**Protocol (written before any test score).** Per fold: validation = 28 days before the test month, training = everything before that. Validation picks the transformer's best epoch (mean pinball), ridge alpha and the quantile-regression penalty. Residual quantiles come from the training window only. No test day enters any fit, selection or calibration step. Levels, penalty grid and seed count were fixed up front and run once; nothing was re-run after seeing a test number.
+
+**Transformer.** The same `PriceTransformer` with the head widened from 1 to 5 outputs per query hour, trained on the pinball loss averaged over the levels (same optimiser, schedule, normalisation, seeds and folds as the point model). Output quantiles are sorted along the level axis, so crossing never reaches a metric. The ensemble averages the members' quantiles.
+
+**Baselines.**
+- *Seasonal naive + residual quantiles:* D-1 price plus the per-hour-of-day empirical quantiles of its errors over the training days.
+- *Ridge + residual quantiles:* the tuned point ridge plus per-hour empirical quantiles of its residuals. A fitted ridge's training residuals are in-sample and too small, so they are cross-fitted (5 contiguous blocks inside the training window, each block predicted by a ridge fit on the other four).
+- *Linear quantile regression:* one L2-penalised linear pinball model per (hour, level) on the same 168 normalised lags and weekday one-hot as ridge. Solved in numpy by majorise-minimise (iteratively reweighted ridge, 100 iterations), penalty from {1, 10, 100, 1000} by validation pinball. No scipy dependency.
+
+Per-fold mean pinball (EUR/MWh, mean over hours and the five levels; lower is better):
+
+| Fold | Days | seasonal naive + residual quantiles | ridge + residual quantiles | linear quantile regression | transformer (pinball) |
+|---|---|---|---|---|---|
+| 2025-10 | 31 | 10.00 | 7.34 | 8.10 | 7.82 |
+| 2025-11 | 30 | 8.42 | 6.62 | 6.38 | 6.45 |
+| 2025-12 | 31 | 7.12 | 5.24 | 4.62 | 4.69 |
+| 2026-01 | 31 | 8.09 | 6.84 | 6.53 | 6.57 |
+| 2026-02 | 28 | 5.89 | 5.16 | 4.54 | 4.36 |
+| 2026-03 | 31 | 14.11 | 9.23 | 9.32 | 9.67 |
+| 2026-04 | 30 | 11.96 | 10.06 | 10.01 | 9.08 |
+| 2026-05 | 31 | 9.79 | 9.65 | 9.11 | 8.32 |
+| 2026-06 | 30 | 16.14 | 14.31 | 13.06 | 11.75 |
+| 2026-07 | 31 | 9.67 | 7.06 | 7.21 | 7.14 |
+| 2026-08 | 31 | 9.99 | 7.62 | 7.43 | 7.49 |
+| 2026-09 | 30 | 17.25 | 12.36 | 11.64 | 11.08 |
+
+Pooled over 365 days (8,760 hours), EUR/MWh:
+
+| Method | Mean pinball | CRPS approx. | 80% coverage | 80% width | Median MAE |
+|---|---|---|---|---|---|
+| seasonal naive + residual quantiles | 10.71 | 22.00 | 78.9% | 82.2 | 27.52 |
+| ridge + residual quantiles | 8.46 | 17.45 | 78.8% | 67.2 | 22.63 |
+| linear quantile regression | 8.17 | 16.84 | 69.4% | 58.4 | 21.65 |
+| transformer (pinball, 5-seed ensemble) | **7.88** | **16.28** | 75.9% | 59.2 | **21.42** |
+
+- **CRPS approx.** is $2\sum_q w_q\,\overline{\text{pinball}}_q$, a Riemann sum over the five levels (each level weighted by the share of $(0,1)$ nearest to it), with the tails beyond 0.1 and 0.9 extrapolated flat. Use it to rank methods, not as an exact CRPS.
+- **Coverage** is the share of hours inside the inclusive [q0.1, q0.9] band; nominal is 80%. Width is the mean q0.9 - q0.1.
+- **Tests** use the per-day mean pinball (24 hours x 5 levels), ensemble minus best baseline (best by pooled mean pinball, the same rule as the point section): -0.29 EUR/MWh, 95% paired-bootstrap CI [-0.66, +0.06] over 365 days, DM-HLN (h=1) statistic -1.59, p = 0.112. The ensemble has the lower mean pinball in 7 of 12 folds. Verdict rule as before: "beats" needs DM p < 0.05 and a CI excluding zero.
+
+Each ensemble member alone against linear quantile regression:
+
+| Seed | Mean pinball | CRPS approx. | Coverage | Width | Diff vs baseline | 95% CI | DM-HLN p | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 8.42 | 17.38 | 75.6% | 62.5 | +0.25 | [-0.13, +0.61] | 0.197 | ties |
+| 1 | 8.27 | 17.07 | 71.5% | 56.8 | +0.10 | [-0.29, +0.48] | 0.623 | ties |
+| 2 | 8.13 | 16.80 | 73.8% | 58.1 | -0.04 | [-0.40, +0.32] | 0.827 | ties |
+| 3 | 8.31 | 17.17 | 72.1% | 58.4 | +0.14 | [-0.25, +0.52] | 0.476 | ties |
+| 4 | 8.12 | 16.78 | 74.0% | 60.3 | -0.05 | [-0.44, +0.33] | 0.798 | ties |
+
+What the numbers say:
+- **Sharper, not better calibrated.** The residual-quantile baselines are close to nominal (78.8% and 78.9%) but wide (67.2 and 82.2 EUR/MWh). Linear quantile regression and the transformer are narrower (58.4 and 59.2) and undercover (69.4% and 75.9%). Pinball rewards that trade here, and the transformer's trade is the better of the two.
+- **Ensembling helps more than the architecture.** Single seeds range from 8.12 to 8.42; the ensemble is 7.88. As in the point study, the margin exists only for the ensemble, and the baselines are not ensembled.
+- **Not tested:** whether the ensemble beats ridge + residual quantiles (8.46) significantly; only the best baseline was tested. No recalibration (for example conformal widening on validation) was tried, so the undercoverage is as trained.
+- **Caveats as above.** The bootstrap treats days as exchangeable and DM uses no autocorrelation correction at h=1, so the CI and p are probably optimistic; they already fail to reach significance, so "ties" stands. Folds are not independent. The best baseline is chosen on the pooled test score, which favours the baseline slightly. One training run and one eval run; I did not repeat them to check reproducibility of the quantile numbers.
+- **Offline tests:** `tests/test_minigpt_price_quantile.py` covers pinball by hand, minimisation at the empirical quantile, sorting of crossed quantiles (the head is forced to cross), coverage and width by hand, CRPS weights, training-window-only residuals, cross-fit residuals being out-of-sample, and the quantile-regression solver against empirical quantiles.
+
 ## Design decisions
 
 - **Byte-level BPE with GPT-2 regex pre-tokenisation.** Byte-level means no unknown tokens and lossless round-trips (tested on CJK and emoji). The regex stops merges from crossing word and punctuation boundaries. When two pairs have the same count, the smallest pair id wins, so training is deterministic. Encoding memoises each chunk, so encoding the 1.1 MB corpus takes seconds.
