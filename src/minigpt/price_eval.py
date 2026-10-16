@@ -153,6 +153,7 @@ class FoldResult:
     train_days: int
     train_days_quarter_hour: int
     seed_mae: list[float]
+    member_preds: list[np.ndarray]
     resolution: str
 
 
@@ -201,6 +202,7 @@ def evaluate_fold(
             sum(d >= cutover for d in split.train.dates) if cutover is not None else 0
         ),
         seed_mae=[mae(m, test.y) for m in members],
+        member_preds=list(members),
         resolution=resolution_flag(month, cutover),
     )
 
@@ -222,6 +224,24 @@ def summarize(folds: list[FoldResult], n_boot: int = 10_000) -> dict[str, Any]:
         verdict = "beats" if d_mean < 0 else "loses to"
     else:
         verdict = "ties"
+    # Each ensemble member alone vs the same baseline: separates ensembling from the model.
+    single_seed = []
+    for k in range(len(folds[0].member_preds)):
+        member = np.concatenate([f.member_preds[k] for f in folds])
+        k_diff = per_day_mae(member, y) - per_day_mae(pooled_preds[best], y)
+        k_mean, k_lo, k_hi = paired_bootstrap(k_diff, n_boot=n_boot)
+        k_stat, k_p = diebold_mariano_hln(k_diff, h=1)
+        single_seed.append(
+            {
+                "seed": k,
+                "mae": mae(member, y),
+                "diff_mean": k_mean,
+                "ci95_lo": k_lo,
+                "ci95_hi": k_hi,
+                "dm_statistic": k_stat,
+                "dm_p": k_p,
+            }
+        )
     per_fold = []
     for f in folds:
         row: dict[str, Any] = {
@@ -255,6 +275,7 @@ def summarize(folds: list[FoldResult], n_boot: int = 10_000) -> dict[str, Any]:
         "diebold_mariano_hln": {"statistic": dm_stat, "p_value": dm_p, "h": 1},
         "verdict": verdict,
         "per_fold": per_fold,
+        "single_seed_vs_best_baseline": single_seed,
     }
 
 
@@ -288,5 +309,15 @@ def format_summary(s: dict[str, Any]) -> str:
         f"{NEAR_ZERO:g}: {s['near_zero_hours']} (sMAPE is unreliable there).",
         "",
         f"Verdict: the transformer {s['verdict']} the best baseline ({s['best_baseline']}).",
+        "",
+        f"Each ensemble member alone vs {s['best_baseline']} (per-day MAE difference):",
+        "",
+        "| Seed | Pooled MAE | Diff vs baseline | 95% CI | DM-HLN p |",
+        "|---|---|---|---|---|",
     ]
+    for r in s["single_seed_vs_best_baseline"]:
+        lines.append(
+            f"| {r['seed']} | {r['mae']:.2f} | {r['diff_mean']:+.2f} | "
+            f"[{r['ci95_lo']:+.2f}, {r['ci95_hi']:+.2f}] | {r['dm_p']:.3g} |"
+        )
     return "\n".join(lines)

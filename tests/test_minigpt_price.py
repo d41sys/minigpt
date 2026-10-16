@@ -304,7 +304,7 @@ def _fake_fold(month: tuple[int, int], model_noise: float, base_noise: float) ->
     test.x = y
     preds = {name: y + rng.normal(0, base_noise, y.shape) for name in BASELINES}
     preds[MODEL] = y + rng.normal(0, model_noise, y.shape)
-    return FoldResult(month, test, preds, 1.0, 100, 0, [1.0], "hourly")
+    return FoldResult(month, test, preds, 1.0, 100, 0, [1.0], [preds[MODEL]], "hourly")
 
 
 def test_summarize_verdicts() -> None:

@@ -69,7 +69,7 @@ needs internet and the extras:
 All numbers come from one run on an Apple-silicon Mac (`device=mps`), seed 0, with the
 CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, BPE vocab 1024.
 
-All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), cause not identified (same-seed reruns now reproduce exactly, so it is not run-to-run non-determinism; the earlier run used a different environment).
+All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), cause not identified (same-seed reruns now reproduce exactly, so it is not run-to-run non-determinism).
 
 | Experiment | Metric | Result |
 |---|---|---|
@@ -160,7 +160,7 @@ How to read these results:
 
 ## Day-ahead electricity price forecasting
 
-**Verdict: the transformer beats the best baseline (ridge on lags), by 1.41 EUR/MWh pooled MAE (6%); the gain is modest and mostly comes from averaging 5 seeds.**
+**Verdict: the 5-seed transformer ensemble beats the best baseline (ridge on lags) by 1.41 EUR/MWh pooled MAE (6%). No single transformer does: each seed alone ties with ridge (table below).**
 
 Task: at 12:00 on day D-1, forecast the 24 hourly NL day-ahead prices of day D (EUR/MWh) from the previous 7 days of prices. Every hour of D-1 is already public at that time, because the D-1 auction clears on D-2 around 13:00. Nothing at or after D 00:00 enters an input; `tests/test_minigpt_price.py` proves this two ways (inputs equal unix timestamps and all are before D 00:00 local, and overwriting every price from day k onward leaves the inputs of windows up to day k unchanged).
 
@@ -214,7 +214,17 @@ Pooled over 365 days (8,760 hours):
 - Verdict rule: "beats" needs DM p < 0.05 and a bootstrap CI that excludes zero in the same direction; otherwise "ties".
 
 Caveats:
-- **Ensemble vs single model.** The 5 individual seeds average a pooled MAE of 22.18 (range 21.79 to 22.62), only 0.48 below ridge. I did not test that single-model gap; most of the margin is ensembling, and ridge is not ensembled.
+- **Ensemble vs single model.** Each member scored alone against ridge with the same paired bootstrap and DM-HLN test (printed by `price-eval`):
+
+  | Seed | Pooled MAE | Diff vs ridge | 95% CI | DM-HLN p |
+  |---|---|---|---|---|
+  | 0 | 21.79 | -0.87 | [-2.06, +0.25] | 0.142 |
+  | 1 | 21.82 | -0.84 | [-2.05, +0.29] | 0.158 |
+  | 2 | 22.31 | -0.35 | [-1.56, +0.83] | 0.562 |
+  | 3 | 22.62 | -0.04 | [-1.27, +1.17] | 0.948 |
+  | 4 | 22.36 | -0.30 | [-1.44, +0.85] | 0.613 |
+
+  Every single model ties with ridge; the significant margin exists only for the ensemble, and ridge is not ensembled.
 - **Dependence.** Both tests treat days as exchangeable (bootstrap) or use no autocorrelation correction at h=1 (DM). Adjacent days are correlated, so the CI and p-value are probably somewhat optimistic. Folds are not independent either.
 - **Small models, small data.** 330 to 665 training days, one hyperparameter setting, one price regime. I probed four variants (d=32, dropout 0.2, 1 layer, lower LR) on one 28-day validation window; none was clearly better, so the defaults stayed. That window (Aug 2026) is also the test month of fold 2026-08, so treat that fold as very slightly less clean.
 - **sMAPE** is unreliable here: 435 of the 8,760 test hours have a negative price and 526 have |price| < 5 EUR/MWh, where a small EUR error becomes a huge percentage. Use MAE and RMSE.
