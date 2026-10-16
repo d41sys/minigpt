@@ -39,7 +39,13 @@ from minigpt.finetune_cls import (
     train_classifier,
 )
 from minigpt.model import GPTConfig, GPTModel
-from minigpt.sft import SFTDataset, download_alpaca_data, format_prompt, train_sft
+from minigpt.sft import (
+    SFTDataset,
+    download_alpaca_data,
+    format_prompt,
+    sft_collate_fn,
+    train_sft,
+)
 from minigpt.train import get_device, load_model, save_checkpoint, train
 
 TINY_SHAKESPEARE_URL = (
@@ -264,8 +270,11 @@ def cmd_eval(args: argparse.Namespace) -> None:
     weights = (args.w_ppl, args.w_em, args.w_f1, args.w_judge)
 
     print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
-    print("\n| Model | Perplexity | EM | Token F1 | Judge (1-5) | Aggregate |")
-    print("|---|---|---|---|---|---|")
+    print(
+        "\n| Model | Alpaca ppl (held-out responses) | Shakespeare ppl | EM | Token F1 "
+        "| Judge (1-5) | Aggregate |"
+    )
+    print("|---|---|---|---|---|---|---|")
     checkpoints = [("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)]
     if args.checkpoints:
         checkpoints = [
@@ -274,10 +283,15 @@ def cmd_eval(args: argparse.Namespace) -> None:
         ]
     for name, ckpt in checkpoints:
         if not ckpt.exists():
-            print(f"| {name} | not run: {ckpt} missing | | | | |")
+            print(f"| {name} | not run: {ckpt} missing | | | | | |")
             continue
         model = load_model(ckpt).to(device)
-        loader = create_dataloader(val_ids, model.config.context_length, 16, shuffle=False)
+        shakespeare = create_dataloader(val_ids, model.config.context_length, 16, shuffle=False)
+        alpaca = DataLoader(
+            SFTDataset(heldout, tok, max_length=model.config.context_length),
+            batch_size=16,
+            collate_fn=sft_collate_fn,
+        )
         em = [exact_match(sample_response(model, tok, r, device), r["output"]) for r in short]
         responses = [sample_response(model, tok, r, device) for r in open_form]
         f1 = [token_f1(p, r["output"]) for p, r in zip(responses, open_form, strict=True)]
@@ -286,7 +300,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
             for p, r in zip(responses, open_form, strict=True)
         ]
         report = EvalReport(
-            perplexity=compute_perplexity(model, loader, device),
+            perplexity=compute_perplexity(model, alpaca, device),
             vocab_size=model.config.vocab_size,
             exact_match=sum(em) / max(1, len(em)),
             exact_match_n=len(em),
@@ -294,8 +308,10 @@ def cmd_eval(args: argparse.Namespace) -> None:
             judge_mean=sum(scores) / max(1, len(scores)),
             open_n=len(open_form),
         )
+        shakespeare_ppl = compute_perplexity(model, shakespeare, device)
         print(
-            f"| {name} | {report.perplexity:.2f} | {report.exact_match:.3f} | "
+            f"| {name} | {report.perplexity:.2f} | {shakespeare_ppl:.2f} | "
+            f"{report.exact_match:.3f} | "
             f"{report.token_f1:.3f} | {report.judge_mean:.2f} | {report.aggregate(weights):.3f} |"
         )
 

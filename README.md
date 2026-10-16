@@ -85,22 +85,25 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 
 `minigpt eval` runs four evals on every checkpoint and combines them into one weighted score:
 
-- **Perplexity** on the tiny-Shakespeare validation split, mapped to [0, 1] as `1 − ln(ppl) / ln(vocab)` (1 = perfect, 0 = uniform guessing).
+- **Perplexity** on the held-out Alpaca responses (prompt tokens masked), mapped to [0, 1] as `1 − ln(ppl) / ln(vocab)` (1 = perfect, 0 = uniform guessing). Shakespeare perplexity is printed alongside but not aggregated.
 - **Exact match** (SQuAD normalisation) on held-out Alpaca rows whose reference has ≤ 5 words (12 rows).
 - **Token F1** on the first 50 held-out Alpaca rows.
-- **Mock judge** (1–5) on the same 50 rows. `MockJudge` maps ROUGE-L F1 onto the rubric; it is an offline stand-in behind the `Judge` protocol, not a quality judgement.
+- **Mock judge** (1–5) on the same 50 rows. `MockJudge` maps ROUGE-L F1 onto the rubric; it is an offline stand-in behind the `Judge` protocol, not a quality judgement, and it is correlated with token F1 (both measure lexical overlap).
 
-Weights default to 0.25 each (`--w-ppl --w-em --w-f1 --w-judge`).
+Weights default to 0.25 each (`--w-ppl --w-em --w-f1 --w-judge`). `minigpt eval --checkpoints pretrain=runs/pretrain/ckpt.pt,sft=...`:
 
-| Model | Perplexity | EM (n=12) | Token F1 (n=50) | Judge (1-5) | Aggregate |
-|---|---|---|---|---|---|
-| pretrain | 40.27 | 0.000 | 0.048 | 1.00 | 0.129 |
-| sft | 93.31 | 0.000 | 0.057 | 1.10 | 0.107 |
-| dpo | 89.33 | 0.000 | 0.054 | 1.08 | 0.107 |
+| Model | Alpaca ppl (held-out) | Shakespeare ppl | EM (n=12) | Token F1 (n=50) | Judge (1-5) | Aggregate |
+|---|---|---|---|---|---|---|
+| pretrain | 409.23 | 40.27 | 0.000 | 0.048 | 1.00 | 0.045 |
+| sft | 39.45 | 93.31 | 0.000 | 0.057 | 1.10 | 0.138 |
+| dpo β=0.05 | 41.46 | 90.12 | 0.000 | 0.035 | 1.04 | 0.127 |
+| dpo β=0.1 | 40.81 | 89.33 | 0.000 | 0.054 | 1.08 | 0.135 |
+| dpo β=0.5 | 39.33 | 88.60 | 0.000 | 0.058 | 1.14 | 0.141 |
 
 Reading, as measured:
-- A 5M-parameter model trained on 900 instructions gets no exact match and near-floor F1. SFT and DPO are slightly above pretrain on F1 and judge.
-- **The aggregate ranks pretrain first, which is a weighting artefact.** Perplexity is measured on Shakespeare; SFT moves the model away from that domain (40 → 93), and the perplexity term outweighs the small F1/judge gains. A per-task report is printed for exactly this reason: the single number hides which trade-off is being made.
+- SFT cuts held-out Alpaca perplexity tenfold (409 → 39) and doubles Shakespeare perplexity (40 → 93): it learns the instruction format and forgets the pretraining domain. Almost all of the aggregate gain comes from this perplexity term.
+- A 5M-parameter model trained on 900 instructions gets no exact match and near-floor F1; the generation metrics barely separate the checkpoints.
+- An earlier version of this table measured perplexity on Shakespeare only, which ranked pretrain first. That compared the models on a domain SFT is meant to leave, so it was replaced.
 
 Pretrain log (excerpt):
 
