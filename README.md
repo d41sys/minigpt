@@ -88,17 +88,17 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 - **Perplexity** on the held-out Alpaca responses (prompt tokens masked), mapped to [0, 1] as `1 − ln(ppl) / ln(vocab)` (1 = perfect, 0 = uniform guessing). Shakespeare perplexity is printed alongside but not aggregated.
 - **Exact match** (SQuAD normalisation) on held-out Alpaca rows whose reference has ≤ 5 words (12 rows).
 - **Token F1** on the first 50 held-out Alpaca rows.
-- **Mock judge** (1–5) on the same 50 rows. `MockJudge` maps ROUGE-L F1 onto the rubric; it is an offline stand-in behind the `Judge` protocol, not a quality judgement, and it is correlated with token F1 (both measure lexical overlap).
+- **Mock judge** (1–5) on the same 50 rows. `MockJudge` maps ROUGE-L F1 onto the rubric. It fills the `Judge` protocol slot offline; it is not a quality judgement and duplicates token F1 (both measure lexical overlap), so it is printed but **not aggregated** by default.
 
-Weights default to 0.25 each (`--w-ppl --w-em --w-f1 --w-judge`). `minigpt eval --checkpoints pretrain=runs/pretrain/ckpt.pt,sft=...`:
+The aggregate is the unweighted mean of perplexity score, EM and token F1 (`--w-ppl --w-em --w-f1` default 1, `--w-judge` default 0). `minigpt eval --checkpoints pretrain=runs/pretrain/ckpt.pt,sft=...`:
 
-| Model | Alpaca ppl (held-out) | Shakespeare ppl | EM (n=12) | Token F1 (n=50) | Judge (1-5) | Aggregate |
+| Model | Alpaca ppl (held-out) | Shakespeare ppl | EM (n=12) | Token F1 (n=50) | Mock judge (ROUGE-L, 1-5) | Aggregate |
 |---|---|---|---|---|---|---|
-| pretrain | 409.23 | 40.27 | 0.000 | 0.048 | 1.00 | 0.045 |
-| sft | 39.45 | 93.31 | 0.000 | 0.057 | 1.10 | 0.138 |
-| dpo β=0.05 | 41.46 | 90.12 | 0.000 | 0.035 | 1.04 | 0.127 |
-| dpo β=0.1 | 40.81 | 89.33 | 0.000 | 0.054 | 1.08 | 0.135 |
-| dpo β=0.5 | 39.33 | 88.60 | 0.000 | 0.058 | 1.14 | 0.141 |
+| pretrain | 409.23 | 40.27 | 0.000 | 0.048 | 1.00 | 0.060 |
+| sft | 39.45 | 93.31 | 0.000 | 0.057 | 1.10 | 0.176 |
+| dpo β=0.05 | 41.46 | 90.12 | 0.000 | 0.035 | 1.04 | 0.166 |
+| dpo β=0.1 | 40.81 | 89.33 | 0.000 | 0.054 | 1.08 | 0.173 |
+| dpo β=0.5 | 39.33 | 88.60 | 0.000 | 0.058 | 1.14 | 0.176 |
 
 Reading, as measured:
 - SFT cuts held-out Alpaca perplexity tenfold (409 → 39) and doubles Shakespeare perplexity (40 → 93): it learns the instruction format and forgets the pretraining domain. Almost all of the aggregate gain comes from this perplexity term.
@@ -144,16 +144,18 @@ SFT sample on a held-out instruction (greedy):
 How to read these results:
 - **Overfitting.** About 414k training tokens is small for 5M params. Val loss bottoms out at step 800 and rises after that while train loss keeps falling. The checkpoint keeps the best-val weights, so every downstream stage starts from step 800.
 - **SFT.** The model learns the response *format*: short declarative answers that reuse words from the instruction. It cannot learn facts or arithmetic, because it was pretrained only on Shakespeare.
-- **DPO.** It learns the preference: reward accuracy rises with β and the loss always starts at exactly log 2. Held-out quality does not move beyond noise. β sweep (`minigpt dpo --beta B --out runs/dpo_bB/ckpt.pt`, then `minigpt eval --checkpoints ...`):
+- **DPO.** It learns the preference: reward accuracy rises with β and the loss always starts at exactly log 2. Held-out quality does not move beyond seed noise. All runs train on the **same 300 preference pairs** (sampled once, saved to `runs/dpo/pairs.json`, reused via `--pairs-file`), so only β or the seed differs:
 
-  | Checkpoint | DPO loss (epoch 2) | Reward acc. | Token F1 (n=50) | Judge (1-5) |
+  | Checkpoint | DPO loss (epoch 2) | Reward acc. | Token F1 (n=50) | Mock judge (1-5) |
   |---|---|---|---|---|
   | sft | – | – | 0.057 | 1.10 |
-  | dpo β=0.05 | 0.386 | 0.923 | 0.035 | 1.04 |
-  | dpo β=0.1 | 0.243 | 0.940 | 0.054 | 1.08 |
-  | dpo β=0.5 | 0.051 | 0.977 | 0.058 | 1.14 |
+  | β=0.05, seed 0 | 0.386 | 0.923 | 0.035 | 1.04 |
+  | β=0.1, seed 0 | 0.243 | 0.940 | 0.054 | 1.08 |
+  | β=0.1, seed 1 | 0.243 | 0.940 | 0.048 | 1.10 |
+  | β=0.1, seed 2 | 0.236 | 0.940 | 0.042 | 1.02 |
+  | β=0.5, seed 0 | 0.051 | 0.977 | 0.058 | 1.14 |
 
-  A judge difference of 0.04 is two of 50 answers moving up one rubric point, so none of the DPO rows is distinguishable from SFT; β=0.05 is the only one visibly below. The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs: it optimises likelihood margins, not answer quality. Reported as measured.
+  A repeat of β=0.1 seed 0 reproduced every number exactly, so runs are deterministic at a fixed seed. Changing only the seed moves token F1 over 0.042–0.054. β=0.5 (0.058) is within 0.001 of SFT, and only β=0.05 (0.035) falls below the seed range. No β improves on SFT. The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs: it optimises likelihood margins, not answer quality. Reported as measured.
 
 ## Design decisions
 

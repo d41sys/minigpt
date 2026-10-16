@@ -19,7 +19,12 @@ from torch.utils.data import DataLoader
 
 from minigpt.bpe import BPETokenizer
 from minigpt.data import create_dataloader
-from minigpt.dpo import PreferenceDataset, generate_preference_pairs, train_dpo
+from minigpt.dpo import (
+    PreferenceDataset,
+    PreferenceSample,
+    generate_preference_pairs,
+    train_dpo,
+)
 from minigpt.evaluate import (
     EvalReport,
     Judge,
@@ -240,7 +245,15 @@ def cmd_dpo(args: argparse.Namespace) -> None:
     policy = load_model(require(SFT_CKPT, "sft"))
     ref = load_model(SFT_CKPT)
     rows = load_alpaca()[:-SFT_HELDOUT]
-    pairs = generate_preference_pairs(ref, tok, rows, num_pairs=args.pairs, device=device)
+    pairs_file = Path(args.pairs_file)
+    if pairs_file.is_file():
+        pairs = [PreferenceSample(**d) for d in json.loads(pairs_file.read_text())]
+        print(f"loaded {len(pairs)} fixed preference pairs from {pairs_file}")
+    else:
+        pairs = generate_preference_pairs(ref, tok, rows, num_pairs=args.pairs, device=device)
+        pairs_file.parent.mkdir(parents=True, exist_ok=True)
+        pairs_file.write_text(json.dumps([vars(p) for p in pairs]))
+        print(f"saved {len(pairs)} preference pairs -> {pairs_file}")
     ds = PreferenceDataset(pairs, tok, max_length=policy.config.context_length)
     print(f"device={device} preference_pairs={len(ds)} beta={args.beta}")
     res = train_dpo(policy, ref, ds, beta=args.beta, epochs=args.epochs, lr=args.lr, device=device)
@@ -272,7 +285,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
     print(
         "\n| Model | Alpaca ppl (held-out responses) | Shakespeare ppl | EM | Token F1 "
-        "| Judge (1-5) | Aggregate |"
+        "| Mock judge (ROUGE-L, 1-5) | Aggregate |"
     )
     print("|---|---|---|---|---|---|---|")
     checkpoints = [("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)]
@@ -379,14 +392,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lr", type=float, default=1e-5)
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--out", default=str(DPO_CKPT))
+    s.add_argument(
+        "--pairs-file",
+        default="runs/dpo/pairs.json",
+        help="reused if present, so runs differing only in beta train on identical pairs",
+    )
     s.set_defaults(func=cmd_dpo)
 
     s = sub.add_parser("eval", help="perplexity + EM + token F1 + mock judge, weighted")
     s.add_argument("--n", type=int, default=50, help="held-out Alpaca rows for F1 and judge")
-    s.add_argument("--w-ppl", type=float, default=0.25)
-    s.add_argument("--w-em", type=float, default=0.25)
-    s.add_argument("--w-f1", type=float, default=0.25)
-    s.add_argument("--w-judge", type=float, default=0.25)
+    s.add_argument("--w-ppl", type=float, default=1.0)
+    s.add_argument("--w-em", type=float, default=1.0)
+    s.add_argument("--w-f1", type=float, default=1.0)
+    s.add_argument(
+        "--w-judge",
+        type=float,
+        default=0.0,
+        help="MockJudge is ROUGE-L rescaled, so it duplicates token F1; off by default",
+    )
     s.add_argument(
         "--checkpoints",
         default=None,
