@@ -1,5 +1,6 @@
 import pytest
 import torch
+
 from minigpt.pretrained import from_pretrained
 
 

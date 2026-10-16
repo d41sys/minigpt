@@ -47,7 +47,7 @@ flowchart LR
 
 ## Quickstart
 
-Run from `packages/minigpt/`. Downloads go to `data/raw/`, outputs to `runs/` (both gitignored).
+Run from the repo root. Downloads go to `data/raw/`, outputs to `runs/` (both gitignored).
 
 ```bash
 uv run minigpt train-tokenizer                     # BPE, vocab 1024, on tiny-Shakespeare
@@ -59,9 +59,9 @@ uv run minigpt dpo
 uv run minigpt eval
 ```
 
-Tests (from the repo root): `uv run pytest packages/minigpt -q`. The GPT-2 parity test
+Tests: `uv run pytest -q`. The GPT-2 parity test
 needs internet and the extras:
-`uv run --package minigpt --extra hf --extra test pytest packages/minigpt -m network`.
+`uv run --extra hf --extra test pytest -m network`.
 
 ## Results
 
@@ -78,7 +78,7 @@ CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, 
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2314; reward accuracy 0.95 |
 | Held-out Alpaca (50 rows, greedy) | ROUGE-L F1, pretrain / SFT / DPO | 0.064 / 0.095 / 0.076 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest packages/minigpt` | 19 passed, 1 deselected (network) in 2.5 s |
+| Unit tests | `pytest` | 19 passed, 1 deselected (network) in 2.5 s |
 
 Pretrain log (excerpt):
 

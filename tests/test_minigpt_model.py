@@ -1,5 +1,6 @@
 import pytest
 import torch
+
 from minigpt.data import SlidingWindowDataset
 from minigpt.model import GPTConfig, GPTModel, count_parameters
 from minigpt.pretrained import map_hf_key_to_minigpt
