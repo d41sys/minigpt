@@ -233,7 +233,7 @@ Caveats:
 
 ### Probabilistic forecasts (quantiles)
 
-**Verdict: no significant gain. The 5-seed quantile-transformer ensemble has the lowest pooled mean pinball (7.88 vs 8.17 EUR/MWh for the best baseline, linear quantile regression), but the paired tests cannot separate them (95% CI [-0.66, +0.06], DM-HLN p = 0.112), so it ties. No single seed beats the baseline either. Its 80% interval covers 75.9% of hours, below the nominal 80%.**
+**Verdict: no significant gain. The 5-seed quantile-transformer ensemble has the lowest pooled mean pinball (7.88 vs 8.17 EUR/MWh for the best baseline, linear quantile regression), but the paired tests cannot separate them (95% CI [-0.66, +0.06], DM-HLN p = 0.112), so it ties. No single seed beats the baseline either. Its 80% interval covers 75.9% of hours, below the nominal 80%; conformal recalibration (below) does not reach nominal under the pre-set rule.**
 
 Flexibility scheduling needs a forecast distribution, not a point. Same task, inputs, 12 folds and split protocol as above; the target is now five quantiles (0.1, 0.25, 0.5, 0.75, 0.9) per hour. The 0.1 to 0.9 band is the 80% prediction interval.
 
@@ -294,9 +294,59 @@ Each ensemble member alone against linear quantile regression:
 What the numbers say:
 - **Sharper, not better calibrated.** The residual-quantile baselines are close to nominal (78.8% and 78.9%) but wide (67.2 and 82.2 EUR/MWh). Linear quantile regression and the transformer are narrower (58.4 and 59.2) and undercover (69.4% and 75.9%). Pinball rewards that trade here, and the transformer's trade is the better of the two.
 - **Ensembling helps more than the architecture.** Single seeds range from 8.12 to 8.42; the ensemble is 7.88. As in the point study, the margin exists only for the ensemble, and the baselines are not ensembled.
-- **Not tested:** whether the ensemble beats ridge + residual quantiles (8.46) significantly; only the best baseline was tested. No recalibration (for example conformal widening on validation) was tried, so the undercoverage is as trained.
+- **Not tested:** whether the ensemble beats ridge + residual quantiles (8.46) significantly; only the best baseline was tested. Conformal recalibration is evaluated in the next subsection; the tables above are the uncalibrated forecasts.
 - **Caveats as above.** The bootstrap treats days as exchangeable and DM uses no autocorrelation correction at h=1, so the CI and p are probably optimistic; they already fail to reach significance, so "ties" stands. Folds are not independent. The best baseline is chosen on the pooled test score, which favours the baseline slightly. One training run and one eval run; I did not repeat them to check reproducibility of the quantile numbers.
 - **Offline tests:** `tests/test_minigpt_price_quantile.py` covers pinball by hand, minimisation at the empirical quantile, sorting of crossed quantiles (the head is forced to cross), coverage and width by hand, CRPS weights, training-window-only residuals, cross-fit residuals being out-of-sample, and the quantile-regression solver against empirical quantiles.
+
+#### Conformal recalibration of the 80% interval (CQR)
+
+**Verdict: conformal calibration does not bring the transformer ensemble to nominal coverage under the rule fixed in advance, and it costs width for no gain in interval score. Pooled CQR lifts its coverage from 75.9% to 77.8% (width 59.2 to 61.7 EUR/MWh, +4%); the day-cluster 95% CI is [75.7%, 80.0%], whose upper end is just below 80%, so the rule says "undercovers". The secondary per-hour variant reaches 80.9% (CI [78.9%, 82.9%]) at +22% width and a slightly worse pinball (+0.06). Linear quantile regression is the method CQR fixes: 69.4% to 79.0% (nominal reached) for +22% width. The ranking does not change: the ensemble still ties the best baseline after calibration (p = 0.149).**
+
+```bash
+uv run minigpt price-quantile-eval --folds 12 --conformal   # 2.5 min, existing checkpoints, no retraining; also writes runs/price_q/conformal_report.json
+```
+
+The raw rows of this run reproduced the table above exactly (7.88 pinball, 75.9% coverage for the ensemble).
+
+**Method.** Conformalized quantile regression (Romano, Patterson and Candes, 2019, [arXiv:1905.03222](https://arxiv.org/abs/1905.03222)). Conformity score of a calibration hour: $E=\max(q_{0.1}-y,\;y-q_{0.9})$, negative when $y$ is inside the band. $Q$ is the $\lceil (n+1)(1-\alpha)\rceil$-th smallest of the $n$ scores with $\alpha=0.2$; the interval becomes $[q_{0.1}-Q,\;q_{0.9}+Q]$, so $Q>0$ widens and $Q<0$ shrinks. The guarantee holds for exchangeable calibration and test points; adjacent months of electricity prices are not.
+
+**Protocol (committed in `c1365af` before any conformal number was computed).**
+- *Calibration window:* the fold's existing validation window, the 28 days before the test month, strictly before every test day, for every method. The alternative (last N training days) was rejected up front: a fitted model's training forecasts are in-sample, so its scores there are too small. Caveat: the validation days also picked the transformer epoch, the ridge alpha and the quantile-regression penalty, so the scores are mildly optimistic and the correction mildly too small.
+- *Variants:* `CQR (pooled hours)` takes one $Q$ per fold from all 28 x 24 = 672 scores (the primary variant); `CQR (per hour of day)` takes one $Q$ per hour from that hour's 28 scores (secondary). Both were declared before scoring and both are reported.
+- *Scope:* applied to all four methods and to each single transformer seed. Only q0.1 and q0.9 are shifted; q0.25, q0.5 and q0.75 are untouched and every forecast is re-sorted, so the five-level pinball changes only through the outer levels and the re-sort.
+- *Verdict rule:* coverage "reaches nominal" if the 95% day-cluster bootstrap CI of the pooled coverage contains 0.80, else "undercovers" or "overcovers". The Wilson interval over the 8,760 hours is also shown, but hours inside a day are strongly dependent, so it is too narrow (transformer, raw: Wilson [75.0%, 76.8%] vs day-cluster [73.8%, 78.2%]) and is not used in the rule.
+- No checkpoint was retrained, and no number was changed after seeing a result.
+
+Pooled over 365 days (8,760 hours). Coverage CI columns are 95%; width is mean q0.9 - q0.1 in EUR/MWh; interval score is the Winkler score $\overline{(u-l)+\tfrac{2}{\alpha}\,\text{distance outside}}$ (lower is better); pinball is the mean over the five levels; the last column is the paired per-day pinball change vs raw.
+
+| Method | Variant | Coverage | Wilson (hours) | Day-cluster | Rule | Width | Interval score | Pinball | Pinball change vs raw [95% CI] | Per-fold coverage (min-max, sd) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| transformer ensemble | raw | 75.9% | [75.0, 76.8] | [73.8, 78.2] | undercovers | 59.2 | 109.3 | 7.88 | - | 68-84% (4.7) |
+| transformer ensemble | CQR pooled | 77.8% | [76.9, 78.7] | [75.7, 80.0] | undercovers | 61.7 | 109.3 | 7.88 | -0.00 [-0.01, +0.01] | 70-86% (5.2) |
+| transformer ensemble | CQR per hour | 80.9% | [80.1, 81.7] | [78.9, 82.9] | reaches nominal | 72.2 | 112.4 | 7.94 | +0.06 [+0.02, +0.10] | 72-90% (5.3) |
+| linear quantile regression | raw | 69.4% | [68.4, 70.3] | [67.1, 71.6] | undercovers | 58.4 | 116.5 | 8.17 | - | 51-82% (8.3) |
+| linear quantile regression | CQR pooled | 79.0% | [78.2, 79.9] | [76.8, 81.1] | reaches nominal | 71.1 | 114.8 | 8.14 | -0.03 [-0.07, -0.00] | 58-90% (9.5) |
+| linear quantile regression | CQR per hour | 81.6% | [80.8, 82.4] | [79.5, 83.6] | reaches nominal | 79.1 | 117.0 | 8.18 | +0.01 [-0.04, +0.06] | 61-94% (9.5) |
+| ridge + residual quantiles | raw | 78.8% | [77.9, 79.6] | [76.5, 81.0] | reaches nominal | 67.2 | 119.3 | 8.46 | - | 57-94% (10.8) |
+| ridge + residual quantiles | CQR pooled | 76.9% | [76.0, 77.8] | [74.5, 79.3] | undercovers | 65.4 | 121.1 | 8.50 | +0.04 [+0.00, +0.08] | 46-94% (14.2) |
+| ridge + residual quantiles | CQR per hour | 78.4% | [77.5, 79.2] | [75.9, 80.8] | reaches nominal | 74.2 | 126.3 | 8.60 | +0.14 [+0.09, +0.19] | 44-96% (14.9) |
+| seasonal naive + residual quantiles | raw | 78.9% | [78.1, 79.8] | [76.7, 81.2] | reaches nominal | 82.2 | 158.5 | 10.71 | - | 60-93% (10.6) |
+| seasonal naive + residual quantiles | CQR pooled | 76.4% | [75.5, 77.3] | [74.0, 78.9] | undercovers | 83.0 | 164.5 | 10.83 | +0.12 [+0.06, +0.18] | 42-89% (14.9) |
+| seasonal naive + residual quantiles | CQR per hour | 78.0% | [77.1, 78.9] | [75.6, 80.4] | reaches nominal | 98.8 | 169.2 | 10.93 | +0.21 [+0.13, +0.30] | 44-93% (15.0) |
+
+Single transformer seeds, coverage raw / CQR pooled / CQR per hour: seed 0 75.6 / 77.7 / 80.5%, seed 1 71.5 / 75.8 / 79.1%, seed 2 73.8 / 77.1 / 80.5%, seed 3 72.1 / 77.9 / 80.7%, seed 4 74.0 / 78.9 / 81.6%. Pooled CQR leaves 2 of 5 seeds "reaches nominal" (seeds 3 and 4), per-hour CQR 5 of 5; all 5 raw seeds undercover. Per-seed widths and pinball are in the printed output.
+
+Ensemble minus best baseline (linear quantile regression, same variant on both sides), per-day mean pinball: raw -0.29 [-0.66, +0.06], p = 0.112; CQR pooled -0.26 [-0.61, +0.08], p = 0.149; CQR per hour -0.24 [-0.59, +0.09], p = 0.161. All "ties".
+
+What the numbers say:
+- **Nominal is not reached by the primary variant for the transformer, and the width cost is small there.** A mean $Q$ of +1.3 EUR/MWh moves coverage 1.9 points; the remaining gap is probably the calibration window not matching the test month (not isolated here).
+- **The per-hour variant reaches nominal partly by finite-sample conservatism.** With n = 28 scores per hour the rank is $\lceil 29 \times 0.8\rceil = 24$, the 85.7th percentile, against the 80.1st for the pooled 672 scores. Mean $Q$ is +6.5 vs +1.3 EUR/MWh for the transformer. So its 80.9% is not evidence that hourly structure matters, and its interval score is worse than raw (112.4 vs 109.3).
+- **No interval-score gain for the transformer.** Pooled CQR leaves it at 109.3; the extra width pays for the extra coverage exactly. Linear quantile regression gains (116.5 to 114.8) but stays above the transformer's raw 109.3, so the transformer, uncalibrated, is still the better interval.
+- **Spread across folds does not shrink.** Transformer per-fold coverage goes from 68-84% (sd 4.7) to 70-86% (sd 5.2). Fold $Q$ values range from -5.1 to +8.0 EUR/MWh: the previous 28 days are a poor guide to the next month. Folds 2026-06 (74.7% to 70.4%) and 2026-08 (81.7% to 74.3%) got worse: both had a negative $Q$ (-3.6 and -5.1), which shrank the band.
+- **CQR can hurt methods that were already near nominal.** The two residual-quantile baselines covered 78.8% and 78.9% raw; pooled CQR shrinks them to 76.9% and 76.4%. The likely cause is that their validation-window scores are smaller than their cross-fitted training residuals (not checked).
+- **Era split.** All 12 test months (365 days) are in the 15-minute era (source from 2025-10-01), so coverage cannot be split by test era. The only available contrast is calibration era: fold 2025-10 is calibrated on 28 hourly-era days (transformer: raw 77.3%, pooled CQR 81.5%, per hour 86.0%), the other 11 on 15-minute-era days (75.8%, 77.5%, 80.4%). One fold of 31 days supports no conclusion.
+- **Caveats.** Folds and days are dependent, so the day-cluster CI (days resampled i.i.d.) is itself probably somewhat narrow. The best baseline is chosen on the pooled test pinball. The calibration days were also used for model selection (above). One run.
+- **Offline tests:** `tests/test_minigpt_price_quantile.py` adds hand cases for conformity scores, the finite-sample rank (including $n$ too small), the conformal quantile and its per-hour version, widening, shrinking and re-sorting of the band, a Wilson interval by hand, the interval score, a simulation where CQR restores 80% from a band covering 38%, the verdict rule and the `--conformal` flag.
 
 ## Design decisions
 
