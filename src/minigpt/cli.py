@@ -46,6 +46,7 @@ from minigpt.finetune_cls import (
     train_classifier,
 )
 from minigpt.model import GPTConfig, GPTModel
+from minigpt.price_conformal import format_conformal_summary, summarize_conformal
 from minigpt.price_data import (
     CITATION,
     DEFAULT_END,
@@ -453,6 +454,12 @@ def cmd_price_quantile_eval(args: argparse.Namespace) -> None:
     report = Path(args.out_root) / "report.json"
     report.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\nwrote {report}")
+    if args.conformal:
+        conformal = summarize_conformal(results, data.cutover, tuple(summary["quantiles"]))
+        print("\n" + format_conformal_summary(conformal))
+        conformal_report = Path(args.out_root) / "conformal_report.json"
+        conformal_report.write_text(json.dumps(conformal, indent=2), encoding="utf-8")
+        print(f"\nwrote {conformal_report}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -575,6 +582,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--folds", type=int, default=12, help="last N full months")
     s.add_argument("--dir", default=str(RAW_DIR))
     s.add_argument("--out-root", default=str(PRICE_Q_DIR))
+    s.add_argument(
+        "--conformal",
+        action="store_true",
+        help="also conformalize the 80%% interval (CQR on the fold's validation window) "
+        "for every method; writes conformal_report.json",
+    )
     s.set_defaults(func=cmd_price_quantile_eval)
 
     s = sub.add_parser("generate", help="sample text")

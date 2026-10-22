@@ -29,6 +29,7 @@ Methods:
 from __future__ import annotations
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -171,12 +172,15 @@ def cross_fit_ridge_residuals(
 
 
 def ridge_quantiles(
-    train: Windows, val: Windows, test: Windows, quantiles: tuple[float, ...]
-) -> tuple[np.ndarray, float]:
-    """Tuned ridge point forecast + cross-fitted training-window residual quantiles."""
+    train: Windows, val: Windows, targets: Sequence[Windows], quantiles: tuple[float, ...]
+) -> tuple[list[np.ndarray], float]:
+    """Tuned ridge point forecast + cross-fitted training-window residual quantiles.
+
+    One fit; returns a (N, 24, Q) forecast for each of `targets`, and the chosen alpha.
+    """
     ridge = fit_ridge_tuned(train, val)
     offsets = residual_offsets(cross_fit_ridge_residuals(train, ridge.alpha), quantiles)
-    return add_offsets(ridge.predict(test), offsets), ridge.alpha
+    return [add_offsets(ridge.predict(w), offsets) for w in targets], ridge.alpha
 
 
 def _irls_quantile(
@@ -256,6 +260,9 @@ class QuantileFoldResult:
     test: Windows
     preds: dict[str, np.ndarray]  # method -> (N, 24, Q)
     member_preds: list[np.ndarray]
+    val: Windows  # the validation window: calibration data for `price_conformal`
+    val_preds: dict[str, np.ndarray]  # method -> (N_val, 24, Q), same models as `preds`
+    val_member_preds: list[np.ndarray]
     ridge_alpha: float
     qr_penalty: float
     resolution: str
@@ -274,26 +281,38 @@ def evaluate_quantile_fold(
     test = split.test
     if len(test) == 0:
         raise ValueError(f"no complete test days in {month_label(month)}")
-    ridge_pred, ridge_alpha = ridge_quantiles(split.train, split.val, test, quantiles)
+    (ridge_test, ridge_val), ridge_alpha = ridge_quantiles(
+        split.train, split.val, (test, split.val), quantiles
+    )
     qr = fit_quantile_regression_tuned(split.train, split.val, quantiles)
-    ens, members = predict_ensemble(load_models(ckpt, device), test, device)
+    models = load_models(ckpt, device)
+    ens, members = predict_ensemble(models, test, device)
+    ens_val, members_val = predict_ensemble(models, split.val, device)
     return QuantileFoldResult(
         month=month,
         test=test,
         preds={
             METHODS[0]: seasonal_naive_quantiles(split.train, test, quantiles),
-            METHODS[1]: ridge_pred,
+            METHODS[1]: ridge_test,
             METHODS[2]: qr.predict(test),
             MODEL: ens,
         },
         member_preds=list(members),
+        val=split.val,
+        val_preds={
+            METHODS[0]: seasonal_naive_quantiles(split.train, split.val, quantiles),
+            METHODS[1]: ridge_val,
+            METHODS[2]: qr.predict(split.val),
+            MODEL: ens_val,
+        },
+        val_member_preds=list(members_val),
         ridge_alpha=ridge_alpha,
         qr_penalty=qr.penalty,
         resolution=resolution_flag(month, cutover),
     )
 
 
-def _versus(
+def paired_versus(
     pred: np.ndarray,
     base: np.ndarray,
     y: np.ndarray,
@@ -306,7 +325,7 @@ def _versus(
     return {"diff_mean": mean, "ci95_lo": lo, "ci95_hi": hi, "dm_statistic": stat, "dm_p": p}
 
 
-def _verdict(v: dict[str, Any]) -> str:
+def paired_verdict(v: dict[str, Any]) -> str:
     significant = v["dm_p"] < ALPHA and (v["ci95_lo"] > 0 or v["ci95_hi"] < 0)
     if not significant:
         return "ties"
@@ -322,8 +341,8 @@ def summarize_quantile(
     pooled = {n: score(p, y, quantiles) for n, p in pooled_preds.items()}
     best = min(METHODS, key=lambda n: pooled[n]["mean_pinball"])
     base = pooled_preds[best]
-    ens = _versus(pooled_preds[MODEL], base, y, quantiles, n_boot)
-    ens["verdict"] = _verdict(ens)
+    ens = paired_versus(pooled_preds[MODEL], base, y, quantiles, n_boot)
+    ens["verdict"] = paired_verdict(ens)
     per_fold: list[dict[str, Any]] = []
     for f in folds:
         per_fold.append(
@@ -346,8 +365,8 @@ def summarize_quantile(
     for k in range(len(folds[0].member_preds)):
         member = np.concatenate([f.member_preds[k] for f in folds])
         row: dict[str, Any] = {"seed": k, **score(member, y, quantiles)}
-        row.update(_versus(member, base, y, quantiles, n_boot))
-        row["verdict"] = _verdict(row)
+        row.update(paired_versus(member, base, y, quantiles, n_boot))
+        row["verdict"] = paired_verdict(row)
         single_seed.append(row)
     return {
         "folds": len(folds),
