@@ -52,7 +52,8 @@ Run from the repo root. Downloads go to `data/raw/`, outputs to `runs/` (both gi
 
 ```bash
 uv run minigpt train-tokenizer                     # BPE, vocab 1024, on tiny-Shakespeare
-uv run minigpt pretrain --data tinyshakespeare --steps 2000
+uv run minigpt pretrain --data tinyshakespeare --steps 2000   # random-offset windows; --sampling aligned = old recipe
+uv run minigpt pretrain-eval                       # val-half and test-half loss of runs/pretrain/ckpt.pt
 uv run minigpt generate --prompt "ROMEO:"
 uv run minigpt data spam && uv run minigpt finetune-cls
 uv run minigpt data alpaca && uv run minigpt sft
@@ -75,13 +76,13 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 | Experiment | Metric | Result |
 |---|---|---|
 | BPE on tiny-Shakespeare | vocab / compression | 1024 tokens, 2.41 bytes/token (17 s to train) |
-| Pretrain, 2000 steps (5 min 42 s) | val loss, step 0 → best | **6.993 → 3.648 (−47.8%)**, best at step 800 |
-| Pretrain | val perplexity (best ckpt) | 40.27 |
+| Pretrain, 2000 steps (about 6 min), aligned windows | test loss / perplexity of the val-selected checkpoint (step 800), 3 seeds | **3.875 / 48.2** (seeds 3.872 to 3.879); the earlier selection-biased "val 3.648 / ppl 40.27" is superseded |
+| Pretrain, random-offset windows (new default) | same, 3 seeds | **3.767 / 43.2** (Δ −0.109, per-seed CIs exclude 0), see [overfitting section](#pretraining-overfitting-and-a-selection-biased-headline) |
 | SMS Spam, head swap (790,786 trainable params) | test accuracy / F1 (n=300) | **0.940** / 0.939 (precision 0.965, recall 0.914) |
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 80 passed, 1 deselected (network) in 15 s |
+| Unit tests | `pytest` | 90 passed, 1 deselected (network) in 15 s |
 
 ### Evaluation pipeline (course lesson 41)
 
@@ -96,7 +97,7 @@ The aggregate is the unweighted mean of perplexity score, EM and token F1 (`--w-
 
 | Model | Alpaca ppl (held-out) | Shakespeare ppl | EM (n=12) | Token F1 (n=50) | Mock judge (ROUGE-L, 1-5) | Aggregate |
 |---|---|---|---|---|---|---|
-| pretrain | 409.23 | 40.27 | 0.000 | 0.048 | 1.00 | 0.060 |
+| pretrain | 409.23 | 40.27 (full validation split, on which this checkpoint was selected; test half: 48.20) | 0.000 | 0.048 | 1.00 | 0.060 |
 | sft | 39.45 | 93.31 | 0.000 | 0.057 | 1.10 | 0.176 |
 | dpo β=0.05 | 41.46 | 90.12 | 0.000 | 0.035 | 1.04 | 0.166 |
 | dpo β=0.1 | 40.81 | 89.33 | 0.000 | 0.054 | 1.08 | 0.173 |
@@ -107,17 +108,18 @@ Reading, as measured:
 - A 5M-parameter model trained on 900 instructions gets no exact match and near-floor F1; the generation metrics barely separate the checkpoints.
 - An earlier version of this table measured perplexity on Shakespeare only, which ranked pretrain first. That compared the models on a domain SFT is meant to leave, so it was replaced.
 
-Pretrain log (excerpt):
+Pretrain log (excerpt; seed 0, `--sampling aligned --dropout 0.1`, the recipe that produced `runs/pretrain/ckpt.pt`; val = first half of the held-out 10%):
 
 ```text
-device=mps train_tokens=414,007 val_tokens=46,001
+device=mps train_tokens=414,007 val_tokens=23,000 test_tokens=23,001
 params=5,066,752
-step     0 train 6.9923 val 6.9396 lr 1.00e-05
-step   400 train 3.5398 val 3.8656 lr 9.46e-04
-step   800 train 2.9612 val 3.6481 lr 7.31e-04
-step  1200 train 2.3985 val 3.7635 lr 4.40e-04
-step  1999 train 1.8530 val 4.1113 lr 1.00e-04
-val loss step0=6.9929 best=3.6481 drop=47.8%
+step     0 train 6.9923 val 6.9426 lr 1.00e-05
+step   400 train 3.5398 val 3.7873 lr 9.46e-04
+step   800 train 2.9612 val 3.5264 lr 7.31e-04
+step  1200 train 2.3985 val 3.6315 lr 4.40e-04
+step  1999 train 1.8529 val 3.9659 lr 1.00e-04
+val loss step0=6.9964 best=3.5264 drop=49.6%
+val-selected checkpoint (step 800): val loss=3.5264 ppl=34.00 (n=89 windows)  test loss=3.8754 ppl=48.20 (n=89 windows)
 ```
 
 `minigpt generate --prompt "ROMEO:"`:
@@ -144,7 +146,7 @@ SFT sample on a held-out instruction (greedy):
 ```
 
 How to read these results:
-- **Overfitting.** About 414k training tokens is small for 5M params. Val loss bottoms out at step 800 and rises after that while train loss keeps falling. The checkpoint keeps the best-val weights, so every downstream stage starts from step 800.
+- **Overfitting.** About 414k training tokens is small for 5M params. Val loss bottoms out at step 800 and rises after that while train loss keeps falling. The checkpoint keeps the best-val weights, so every downstream stage starts from step 800 of the aligned-window run. Random-offset windows reduce but do not remove this (see the pretraining section below).
 - **SFT.** The model learns the response *format*: short declarative answers that reuse words from the instruction. It cannot learn facts or arithmetic, because it was pretrained only on Shakespeare.
 - **DPO.** It learns the preference: reward accuracy rises with β and the loss always starts at exactly log 2. Held-out quality does not move detectably. All runs train on the **same 300 preference pairs** (sampled once, saved to `runs/dpo/pairs.json`, reused via `--pairs-file`), so only β or the seed differs:
 
@@ -170,6 +172,28 @@ How to read these results:
   Ten checkpoints were scored (`runs/dpo`, `runs/dpo_b*`, `runs/fx_*`), but they are five distinct models: β=0.1 seed 0 exists four times (`dpo`, `dpo_b0.1`, `fx_b0.1_a`, `fx_b0.1_b`), β=0.05 and β=0.5 twice each (`dpo_b*`, `fx_b*_a`). Same-seed reruns differ in weights by about 1e-5 (so the pre-registration's "none bit-identical, none merged" check passed), yet every one of the 100 greedy responses is identical within each group, so each group gives one row above and the same CI. The Holm adjustment was applied over the 10 pre-registered rows, as written. Merging the duplicates (**post-hoc**, 5 comparisons) gives Holm p of 0.182 (β=0.05), 0.220 (β=0.1 seed 2) and 1.0 for the rest, so the verdicts do not change.
 
   No variant is different from SFT, and every point estimate is below SFT. "No β improves on SFT" holds, but with 100 rows the CIs are about ±0.014 F1 wide, so a small gain or loss is not excluded: β=0.05 has a raw 95% CI that excludes 0 on the negative side (and β=0.1 seed 2 only just includes it), which does not survive Holm over 10 comparisons. The rows are the only source of uncertainty here: the 300 pairs and each seed's training are fixed, so the CIs do not cover variation across training seeds or pair samples (the seed spread above is a separate, rough look at that). The rejected samples come from the same weak model, so DPO mostly learns to move away from its own outputs: it optimises likelihood margins, not answer quality. Reported as measured.
+
+### Pretraining: overfitting and a selection-biased headline
+
+The earlier headline (val loss 3.648, perplexity 40.27) picked the best of 11 validation evaluations and reported that same minimum, so it is optimistically biased. The model also overfits: the train set is 414k tokens in non-overlapping windows (about 40 epochs in 2000 steps) and val loss turns up after step 800. The held-out 10% is now cut deterministically into contiguous **val** (first 23,000 tokens, selects the checkpoint) and **test** (last 23,001 tokens, reported only). Protocol, written before any run: [`docs/protocol-pretrain-regularization.md`](docs/protocol-pretrain-regularization.md). Raw per-run JSON and `summary.json`: `docs/pretrain-regularization/`. Reproduce with `minigpt pretrain --name pre_<variant>_s<seed> --seed <seed> [--sampling aligned] [--dropout 0.2] --results-out ...` and `minigpt pretrain-compare`.
+
+Headline, corrected: the val-selected baseline checkpoint has **test loss 3.875 (perplexity 48.2)**, mean over seeds 0, 1, 2 (range 3.872 to 3.879). The seed-0 rerun reproduces the checkpoint used downstream: same selected step (800) and the existing `runs/pretrain/ckpt.pt` scores the same on both halves under `minigpt pretrain-eval` (val 3.5264, test 3.8754). So 3.648 / 40.27 understated the loss by about 0.23 nats; the halves differ in difficulty (val 3.53 vs test 3.88), so part of that gap is the split and not only selection.
+
+Three variants, seeds 0, 1, 2, same 2000-step budget, one factor changed at a time, selected on val, scored on test. `base`: aligned windows, dropout 0.1. `randoff`: random-offset windows (stride-1 windows, shuffled). `drop02`: aligned, dropout 0.2. Δ is test loss minus the same-seed baseline; the CI is a paired bootstrap over the 89 test windows (10,000 resamples), so it reflects test-set sampling noise only.
+
+| Variant | seed | selected step | test loss (ppl) | Δ test vs base [95% CI] |
+|---|---|---|---|---|
+| base | 0 / 1 / 2 | 800 / 800 / 800 | 3.8754 (48.20) / 3.8785 (48.35) / 3.8720 (48.04) | n/a |
+| drop02 | 0 | 1200 | 3.8282 (45.98) | −0.047 [−0.064, −0.030] |
+| drop02 | 1 | 1400 | 3.8539 (47.17) | −0.025 [−0.041, −0.008] |
+| drop02 | 2 | 1200 | 3.8408 (46.56) | −0.031 [−0.047, −0.016] |
+| randoff | 0 | 1200 | 3.7408 (42.13) | −0.135 [−0.153, −0.116] |
+| randoff | 1 | 1400 | 3.7646 (43.14) | −0.114 [−0.135, −0.093] |
+| randoff | 2 | 1200 | 3.7946 (44.46) | −0.077 [−0.101, −0.053] |
+
+Pre-registered rule: adopt a variant only if, on every seed, its test loss is lower than the baseline by at least 0.05 **and** the per-seed 95% CI excludes 0. `randoff` meets it on all three seeds (mean test loss 3.767, Δ −0.109); `drop02` does not (its gain is 0.025 to 0.047 on every seed, below the 0.05 margin). **Decision: random-offset sampling is the new default; dropout stays 0.1.** `--sampling aligned` restores the old windows. Neither variant removes the overfitting: val loss still rises after its minimum (`randoff` ends at val 3.41 to 3.42 vs minimum 3.35 to 3.37). The test half is 23k tokens of one contiguous passage adjacent to the validation half, so this is a within-corpus hold-out. The 0.05 margin and the choice of variants were fixed before the runs; nothing in this section is post-hoc.
+
+The default change affects only new runs. SFT, DPO, the spam classifier and the eval tables in this README were trained from the old aligned-window checkpoint (`runs/pretrain/ckpt.pt`, not overwritten) and are **not retrained**; a bare `minigpt pretrain` no longer reproduces that checkpoint (use `--sampling aligned`).
 
 ## Day-ahead electricity price forecasting
 
