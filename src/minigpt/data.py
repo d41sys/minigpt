@@ -53,6 +53,12 @@ class SlidingWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         return x, y
 
 
+def split_val_test(ids: Sequence[int]) -> tuple[list[int], list[int]]:
+    """Deterministically cut validation tokens into contiguous val (first half) and test halves."""
+    half = len(ids) // 2
+    return list(ids[:half]), list(ids[half:])
+
+
 def create_dataloader(
     ids: Sequence[int] | torch.Tensor,
     context_length: int,

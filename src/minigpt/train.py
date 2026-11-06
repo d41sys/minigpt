@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
@@ -74,7 +75,7 @@ def evaluate_loss(
     device: torch.device,
     max_batches: int = 20,
 ) -> float:
-    """Compute average cross-entropy loss over a dataloader."""
+    """Average cross-entropy per window over a dataloader (weights every window equally)."""
     model.eval()
     total_loss = 0.0
     count = 0
@@ -85,11 +86,29 @@ def evaluate_loss(
         x, y = x.to(device), y.to(device)
         _, loss = model(x, targets=y)
         if loss is not None:
-            total_loss += loss.item()
-            count += 1
+            total_loss += loss.item() * x.size(0)
+            count += x.size(0)
 
     model.train()
     return total_loss / max(1, count)
+
+
+@torch.no_grad()
+def window_losses(
+    model: nn.Module,
+    data_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    device: torch.device,
+) -> list[float]:
+    """Mean cross-entropy of every window in the loader (dropout off), in loader order."""
+    model.eval()
+    out: list[float] = []
+    for x, y in data_loader:
+        x, y = x.to(device), y.to(device)
+        logits, _ = model(x)
+        ce = F.cross_entropy(logits.transpose(1, 2), y, reduction="none")
+        out.extend(ce.mean(dim=1).tolist())
+    model.train()
+    return out
 
 
 def save_checkpoint(
