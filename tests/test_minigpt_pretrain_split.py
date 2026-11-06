@@ -48,13 +48,13 @@ def test_stride_one_sampling_reaches_every_offset() -> None:
     assert {int(dense[i][0][0]) for i in range(len(dense))} == set(range(16))
 
 
-def test_pretrain_flags_default_to_the_old_recipe() -> None:
+def test_pretrain_flag_defaults_follow_the_preregistered_decision() -> None:
     args = build_parser().parse_args(["pretrain"])
-    assert (args.dropout, args.sampling, args.results_out) == (0.1, "aligned", None)
+    assert (args.dropout, args.sampling, args.results_out) == (0.1, "random", None)
     args = build_parser().parse_args(
-        ["pretrain", "--dropout", "0.2", "--sampling", "random", "--results-out", "x.json"]
+        ["pretrain", "--dropout", "0.2", "--sampling", "aligned", "--results-out", "x.json"]
     )
-    assert (args.dropout, args.sampling) == (0.2, "random")
+    assert (args.dropout, args.sampling) == (0.2, "aligned")
 
 
 def test_pretrain_eval_reports_val_and_test_halves(
