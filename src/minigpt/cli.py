@@ -49,6 +49,7 @@ from minigpt.finetune_cls import (
     train_classifier,
 )
 from minigpt.model import GPTConfig, GPTModel
+from minigpt.pretrain_compare import compare, format_report, load_records
 from minigpt.price_conformal import format_conformal_summary, summarize_conformal
 from minigpt.price_data import (
     CITATION,
@@ -271,6 +272,14 @@ def cmd_pretrain_eval(args: argparse.Namespace) -> None:
     model = load_model(require(Path(args.checkpoint), "pretrain"))
     losses = half_losses(model, {"val": val_ids, "test": test_ids}, args.batch_size, device)
     print(f"{args.checkpoint}: {format_half_losses(losses)}")
+
+
+def cmd_pretrain_compare(args: argparse.Namespace) -> None:
+    """Apply the pre-registered adoption rule to the per-run JSONs in --dir."""
+    report = compare(load_records(args.dir))
+    print(format_report(report))
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
 
 
 def cmd_finetune_cls(args: argparse.Namespace) -> None:
@@ -649,8 +658,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--sampling",
         choices=["aligned", "random"],
-        default="aligned",
-        help="train windows: aligned (stride = context length) or random offsets (stride 1)",
+        default="random",
+        help="train windows: random offsets (stride 1, default) or aligned (stride = context)",
     )
     s.add_argument("--results-out", default=None, help="write per-run JSON (losses, history)")
     s.set_defaults(func=cmd_pretrain)
@@ -659,6 +668,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--checkpoint", default=str(PRETRAIN_CKPT))
     s.add_argument("--batch-size", type=int, default=32)
     s.set_defaults(func=cmd_pretrain_eval)
+
+    s = sub.add_parser("pretrain-compare", help="pre-registered variant comparison on test half")
+    s.add_argument("--dir", default="docs/pretrain-regularization")
+    s.add_argument("--json-out", default=None)
+    s.set_defaults(func=cmd_pretrain_compare)
 
     s = sub.add_parser("finetune-cls", help="spam classifier via head swap")
     s.add_argument("--base", default=str(PRETRAIN_CKPT))
