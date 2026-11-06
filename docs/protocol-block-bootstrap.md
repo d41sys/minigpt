@@ -60,3 +60,24 @@ Raw output of `uv run --offline minigpt price-eval --folds 12` is saved to
 is kept as `runs/price/report_pre_block.json`; every previously reported number must reproduce from it.
 Sensitivity (b = 3, 14) comes from a separate command whose output is saved next to it, labelled post-hoc.
 When a CI includes 0 the result is written as "no detectable effect".
+
+## Results (2026-11-06)
+
+Command: `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run --offline minigpt price-eval --folds 12`
+(raw output: `runs/price/price-eval-block-bootstrap.txt`, report: `runs/price/report.json`; both are under the
+git-ignored `runs/`, so the table below is the committed copy). Re-running gave identical output.
+Every number from the previous report (`runs/price/report_pre_block.json`) reproduced exactly.
+
+Pooled MAE, EUR/MWh: ridge on lags 22.66, bagged ridge (5) 23.20, transformer 21.25.
+
+| Baseline | Diff (transformer - baseline) | iid CI | block CI, b = 7 | DM-HLN p | Post-hoc block CI, b = 3 / 14 |
+|---|---|---|---|---|---|
+| ridge on lags | -1.41 | [-2.59, -0.28] | [-2.87, -0.20] | 0.0164 | [-2.73, -0.27] / [-2.79, -0.25] |
+| bagged ridge (5) | -1.94 | [-3.28, -0.72] | [-3.65, -0.57] | 0.0030 | [-3.45, -0.70] / [-3.59, -0.62] |
+
+Against the decision rule: both b = 7 block CIs exclude 0, both iid CIs exclude 0, both DM p < 0.05, all in
+the negative direction. No trigger fired, so the README keeps "beats", now with the block CI. Bagging made
+ridge worse (23.20 vs 22.66), so the matched baseline is not harder than plain ridge.
+
+Limits that stay: DM-HLN at h = 1 has no autocorrelation correction; the 365 days are one market regime and
+the folds are not independent; the single-seed transformers still show no detectable difference from ridge.

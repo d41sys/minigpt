@@ -12,6 +12,7 @@ import torch
 
 from minigpt.price_data import Windows, month_bounds, split_windows
 from minigpt.price_model import (
+    fit_bagged_ridge,
     fit_ridge_tuned,
     load_models,
     predict_ensemble,
@@ -19,10 +20,15 @@ from minigpt.price_model import (
     weekly_naive,
 )
 
-BASELINES = ("seasonal naive (D-1)", "weekly naive (D-7)", "ridge on lags")
+RIDGE = "ridge on lags"
+BAGGED = "bagged ridge (5)"
+BASELINES = ("seasonal naive (D-1)", "weekly naive (D-7)", RIDGE, BAGGED)
+RIDGE_BASELINES = (RIDGE, BAGGED)  # the verdict must hold against both
 MODEL = "transformer"
 NEAR_ZERO = 5.0  # EUR/MWh: |price| below this makes sMAPE's denominator tiny
 ALPHA = 0.05
+BLOCK_DAYS = 7  # moving-block length used by the verdict (weekly cycle); see docs/protocol-*.md
+SENSITIVITY_BLOCKS = (3, 14)  # post-hoc only; never enters the verdict
 
 
 # --------------------------------------------------------------------------- metrics
@@ -66,6 +72,28 @@ def paired_bootstrap(
     """
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, diff.size, size=(n_boot, diff.size))
+    means = diff[idx].mean(axis=1)
+    lo, hi = np.percentile(means, [2.5, 97.5])
+    return float(diff.mean()), float(lo), float(hi)
+
+
+def block_bootstrap(
+    diff: np.ndarray, block: int, n_boot: int = 10_000, seed: int = 0
+) -> tuple[float, float, float]:
+    """Mean of per-day differences and its 95% percentile moving-block bootstrap CI.
+
+    Overlapping blocks of `block` consecutive days (start uniform on 0..n-block) are drawn with
+    replacement, concatenated and cut to n days, which keeps dependence up to `block` days
+    inside a resample. `block` = 1 is the i.i.d. day bootstrap; `block` = n collapses every
+    resample to the data itself.
+    """
+    n = diff.size
+    if not 1 <= block <= n:
+        raise ValueError(f"block must be in 1..{n}, got {block}")
+    rng = np.random.default_rng(seed)
+    n_blocks = -(-n // block)
+    starts = rng.integers(0, n - block + 1, size=(n_boot, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)).reshape(n_boot, -1)[:, :n]
     means = diff[idx].mean(axis=1)
     lo, hi = np.percentile(means, [2.5, 97.5])
     return float(diff.mean()), float(lo), float(hi)
@@ -184,12 +212,14 @@ def evaluate_fold(
     if len(test) == 0:
         raise ValueError(f"no complete test days in {month_label(month)}")
     ridge = fit_ridge_tuned(split.train, split.val)
+    bagged = fit_bagged_ridge(split.train, ridge.alpha)
     models = load_models(ckpt, device)
     ens, members = predict_ensemble(models, test, device)
     preds = {
         BASELINES[0]: seasonal_naive(test),
         BASELINES[1]: weekly_naive(test),
-        BASELINES[2]: ridge.predict(test),
+        RIDGE: ridge.predict(test),
+        BAGGED: bagged.predict(test),
         MODEL: ens,
     }
     return FoldResult(
@@ -207,8 +237,46 @@ def evaluate_fold(
     )
 
 
+def _compare(
+    model_day: np.ndarray, base_day: np.ndarray, n_boot: int
+) -> tuple[dict[str, Any], np.ndarray]:
+    """Per-day MAE difference (model minus baseline) with iid and block CIs and the DM-HLN test."""
+    diff = model_day - base_day
+    d_mean, lo, hi = paired_bootstrap(diff, n_boot=n_boot)
+    _, b_lo, b_hi = block_bootstrap(diff, BLOCK_DAYS, n_boot=n_boot)
+    dm_stat, dm_p = diebold_mariano_hln(diff, h=1)
+    out = {
+        "mean": d_mean,
+        "ci95_lo": lo,
+        "ci95_hi": hi,
+        "block_days": BLOCK_DAYS,
+        "block_ci95_lo": b_lo,
+        "block_ci95_hi": b_hi,
+        "dm_statistic": dm_stat,
+        "dm_p": dm_p,
+        "n_days": int(diff.size),
+    }
+    return out, diff
+
+
+def _direction(c: dict[str, Any]) -> str:
+    """'beats' / 'loses to' if DM p < ALPHA and both CIs exclude 0 on the same side, else ''."""
+    if c["dm_p"] >= ALPHA:
+        return ""
+    better = c["mean"] < 0
+    for lo, hi in ((c["ci95_lo"], c["ci95_hi"]), (c["block_ci95_lo"], c["block_ci95_hi"])):
+        if not (hi < 0 if better else lo > 0):
+            return ""
+    return "beats" if better else "loses to"
+
+
 def summarize(folds: list[FoldResult], n_boot: int = 10_000) -> dict[str, Any]:
-    """Per-fold and pooled scores, bootstrap CI, DM-HLN test and verdict vs the best baseline."""
+    """Per-fold and pooled scores, tests vs the baselines, and the verdict.
+
+    The verdict compares the transformer with both ridge variants (plain and bagged). "beats" (or
+    "loses to") needs, against each of them, DM-HLN p < 0.05 and both the iid and the moving-block
+    (7-day) bootstrap CIs excluding zero on the same side; otherwise "no detectable difference".
+    """
     y = np.concatenate([f.test.y for f in folds])
     pooled_preds = {name: np.concatenate([f.preds[name] for f in folds]) for name in folds[0].preds}
     pooled = {
@@ -216,19 +284,27 @@ def summarize(folds: list[FoldResult], n_boot: int = 10_000) -> dict[str, Any]:
         for name, p in pooled_preds.items()
     }
     best = min(BASELINES, key=lambda n: pooled[n]["mae"])
-    diff = per_day_mae(pooled_preds[MODEL], y) - per_day_mae(pooled_preds[best], y)
-    d_mean, d_lo, d_hi = paired_bootstrap(diff, n_boot=n_boot)
-    dm_stat, dm_p = diebold_mariano_hln(diff, h=1)
-    ci_excludes_zero = d_lo > 0 or d_hi < 0
-    if dm_p < ALPHA and ci_excludes_zero:
-        verdict = "beats" if d_mean < 0 else "loses to"
-    else:
-        verdict = "ties"
+    day = {name: per_day_mae(p, y) for name, p in pooled_preds.items()}
+    comparisons: dict[str, dict[str, Any]] = {}
+    for name in dict.fromkeys((best, *RIDGE_BASELINES)):
+        comparisons[name], k_diff = _compare(day[MODEL], day[name], n_boot)
+        comparisons[name]["folds_model_better"] = sum(
+            mae(f.preds[MODEL], f.test.y) < mae(f.preds[name], f.test.y) for f in folds
+        )
+        comparisons[name]["post_hoc_block_sensitivity"] = {
+            str(b): {"ci95_lo": lo, "ci95_hi": hi}
+            for b in SENSITIVITY_BLOCKS
+            for _, lo, hi in [block_bootstrap(k_diff, b, n_boot)]
+        }
+    directions = {_direction(comparisons[name]) for name in RIDGE_BASELINES}
+    verdict = directions.pop() if len(directions) == 1 and "" not in directions else ""
+    verdict = verdict or "no detectable difference"
+    d_best = comparisons[best]
     # Each ensemble member alone vs the same baseline: separates ensembling from the model.
     single_seed = []
     for k in range(len(folds[0].member_preds)):
         member = np.concatenate([f.member_preds[k] for f in folds])
-        k_diff = per_day_mae(member, y) - per_day_mae(pooled_preds[best], y)
+        k_diff = per_day_mae(member, y) - day[best]
         k_mean, k_lo, k_hi = paired_bootstrap(k_diff, n_boot=n_boot)
         k_stat, k_p = diebold_mariano_hln(k_diff, h=1)
         single_seed.append(
@@ -265,14 +341,8 @@ def summarize(folds: list[FoldResult], n_boot: int = 10_000) -> dict[str, Any]:
         "near_zero_hours": int((np.abs(y) < NEAR_ZERO).sum()),
         "pooled": pooled,
         "best_baseline": best,
-        "mae_diff_vs_best_baseline": {
-            "mean": d_mean,
-            "ci95_lo": d_lo,
-            "ci95_hi": d_hi,
-            "n_days": int(diff.size),
-            "folds_model_better": int(sum(r["mae"][MODEL] < r["mae"][best] for r in per_fold)),
-        },
-        "diebold_mariano_hln": {"statistic": dm_stat, "p_value": dm_p, "h": 1},
+        "mae_diff_vs_best_baseline": d_best,
+        "ridge_comparisons": {name: comparisons[name] for name in RIDGE_BASELINES},
         "verdict": verdict,
         "per_fold": per_fold,
         "single_seed_vs_best_baseline": single_seed,
@@ -296,19 +366,34 @@ def format_summary(s: dict[str, Any]) -> str:
     for name in names:
         p = s["pooled"][name]
         lines.append(f"| {name} | {p['mae']:.2f} | {p['rmse']:.2f} | {p['smape']:.1f} |")
-    d = s["mae_diff_vs_best_baseline"]
-    dm = s["diebold_mariano_hln"]
     lines += [
         "",
-        f"Best baseline (pooled MAE): {s['best_baseline']}. Per-day MAE, transformer minus "
-        f"baseline: {d['mean']:+.2f} EUR/MWh, 95% paired-bootstrap CI "
-        f"[{d['ci95_lo']:+.2f}, {d['ci95_hi']:+.2f}] over {d['n_days']} days; "
-        f"DM-HLN statistic {dm['statistic']:+.2f}, p = {dm['p_value']:.3g}; "
-        f"transformer has the lower MAE in {d['folds_model_better']}/{s['folds']} folds.",
+        "Per-day MAE, transformer minus baseline (negative = transformer better). CIs are 95%: "
+        f"iid = day bootstrap, block = moving-block bootstrap, {BLOCK_DAYS}-day blocks (the "
+        "verdict's CI). Post-hoc block-length sensitivity in the last column.",
+        "",
+        f"| Baseline | Diff | iid CI | block CI ({BLOCK_DAYS} d) | DM-HLN p | Better in folds | "
+        "Block CI, 3 d / 14 d (post-hoc) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for name, c in s["ridge_comparisons"].items():
+        sens = c["post_hoc_block_sensitivity"]
+        sens_cells = " / ".join(
+            f"[{v['ci95_lo']:+.2f}, {v['ci95_hi']:+.2f}]" for v in sens.values()
+        )
+        lines.append(
+            f"| {name} | {c['mean']:+.2f} | [{c['ci95_lo']:+.2f}, {c['ci95_hi']:+.2f}] | "
+            f"[{c['block_ci95_lo']:+.2f}, {c['block_ci95_hi']:+.2f}] | {c['dm_p']:.3g} | "
+            f"{c['folds_model_better']}/{s['folds']} | {sens_cells} |"
+        )
+    lines += [
+        "",
+        f"Best baseline (pooled MAE): {s['best_baseline']}. {s['days']} days.",
         f"Pooled hours with negative price: {s['negative_hours']}; with |price| < "
         f"{NEAR_ZERO:g}: {s['near_zero_hours']} (sMAPE is unreliable there).",
         "",
-        f"Verdict: the transformer {s['verdict']} the best baseline ({s['best_baseline']}).",
+        f"Verdict for the transformer vs the ridge baselines ({', '.join(RIDGE_BASELINES)}): "
+        f"{s['verdict']}.",
         "",
         f"Each ensemble member alone vs {s['best_baseline']} (per-day MAE difference):",
         "",

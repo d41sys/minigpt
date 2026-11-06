@@ -22,10 +22,12 @@ from minigpt.price_data import (
     to_hourly,
 )
 from minigpt.price_eval import (
+    BAGGED,
     BASELINES,
     MODEL,
     FoldResult,
     betainc,
+    block_bootstrap,
     diebold_mariano_hln,
     evaluate_fold,
     mae,
@@ -41,6 +43,7 @@ from minigpt.price_model import (
     PriceTransformer,
     TrainConfig,
     build_features,
+    fit_bagged_ridge,
     fit_ridge,
     seasonal_naive,
     train_ensemble,
@@ -234,6 +237,18 @@ def test_ridge_learns_a_linear_rule() -> None:
     assert mae(strong.predict(w), w.y) > mae(model.predict(w), w.y)
 
 
+def test_bagged_ridge_averages_bootstrap_members() -> None:
+    w = make_windows(synthetic_table(date(2025, 1, 1), 120, seed=1))
+    bag = fit_bagged_ridge(w, alpha=10.0)
+    assert len(bag.members) == 5
+    # members see different resamples, so they differ from each other and from the plain fit
+    assert not np.allclose(bag.members[0].coef, bag.members[1].coef)
+    assert not np.allclose(bag.members[0].coef, fit_ridge(w, 10.0).coef)
+    assert np.allclose(bag.predict(w), np.mean([m.predict(w) for m in bag.members], axis=0))
+    again = fit_bagged_ridge(w, alpha=10.0)  # fixed seeds: deterministic
+    assert np.array_equal(bag.predict(w), again.predict(w))
+
+
 def test_metrics_hand_computed() -> None:
     y = np.array([[100.0, 200.0]])
     p = np.array([[110.0, 180.0]])
@@ -254,6 +269,26 @@ def test_paired_bootstrap() -> None:
     rng = np.random.default_rng(0)
     mean, lo, hi = paired_bootstrap(rng.normal(0.0, 1.0, 400), n_boot=2000)
     assert lo < 0 < hi
+
+
+def test_block_bootstrap_boundaries_and_dependence() -> None:
+    mean, lo, hi = block_bootstrap(np.full(10, -2.0), block=4, n_boot=200)  # 10 is not 3 * 4
+    assert mean == lo == hi == pytest.approx(-2.0)
+    d = np.random.default_rng(0).normal(size=50)
+    mean, lo, hi = block_bootstrap(d, block=50, n_boot=200)  # one block: every resample is d
+    assert lo == hi == pytest.approx(mean)
+    for bad in (0, 51):
+        with pytest.raises(ValueError):
+            block_bootstrap(d, block=bad)
+    # AR(1) with strong positive dependence: blocks give a wider CI than i.i.d. resampling
+    rng = np.random.default_rng(1)
+    e = rng.normal(size=400)
+    ar = np.zeros(400)
+    for t in range(1, 400):
+        ar[t] = 0.9 * ar[t - 1] + e[t]
+    _, iid_lo, iid_hi = block_bootstrap(ar, block=1, n_boot=2000)
+    _, blk_lo, blk_hi = block_bootstrap(ar, block=20, n_boot=2000)
+    assert blk_hi - blk_lo > 1.5 * (iid_hi - iid_lo)
 
 
 def test_diebold_mariano_hln_hand_computed() -> None:
@@ -294,7 +329,12 @@ def test_train_ensemble_and_evaluate_fold_end_to_end() -> None:
     assert res.train_days_quarter_hour == 0
 
 
-def _fake_fold(month: tuple[int, int], model_noise: float, base_noise: float) -> FoldResult:
+def _fake_fold(
+    month: tuple[int, int],
+    model_noise: float,
+    base_noise: float,
+    bagged_noise: float | None = None,
+) -> FoldResult:
     rng = np.random.default_rng(month[1])
     table = synthetic_table(date(2025, month[1], 1), 30, seed=month[1])
     y = table.prices
@@ -303,6 +343,8 @@ def _fake_fold(month: tuple[int, int], model_noise: float, base_noise: float) ->
     test.y = y
     test.x = y
     preds = {name: y + rng.normal(0, base_noise, y.shape) for name in BASELINES}
+    if bagged_noise is not None:
+        preds[BAGGED] = y + rng.normal(0, bagged_noise, y.shape)
     preds[MODEL] = y + rng.normal(0, model_noise, y.shape)
     return FoldResult(month, test, preds, 1.0, 100, 0, [1.0], [preds[MODEL]], "hourly")
 
@@ -314,7 +356,15 @@ def test_summarize_verdicts() -> None:
     worse = summarize([_fake_fold((2025, m), 20.0, 1.0) for m in (1, 2, 3)], n_boot=500)
     assert worse["verdict"] == "loses to"
     same = summarize([_fake_fold((2025, m), 5.0, 5.0) for m in (1, 2, 3)], n_boot=500)
-    assert same["verdict"] == "ties"
+    assert same["verdict"] == "no detectable difference"
+    # beating plain ridge is not enough: the matched (bagged) ridge must be beaten too
+    matched = summarize(
+        [_fake_fold((2025, m), 1.0, 20.0, bagged_noise=0.5) for m in (1, 2, 3)], n_boot=500
+    )
+    assert matched["verdict"] == "no detectable difference"
+    assert matched["best_baseline"] == BAGGED
+    assert set(matched["ridge_comparisons"]) == {"ridge on lags", BAGGED}
+    assert matched["ridge_comparisons"]["ridge on lags"]["mean"] < -1.0
     assert same["days"] == 90 and len(same["per_fold"]) == 3
 
 

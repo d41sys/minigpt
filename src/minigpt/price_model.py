@@ -351,6 +351,29 @@ def fit_ridge(w: Windows, alpha: float) -> RidgeModel:
     return RidgeModel(coef=coef, intercept=ym - fm @ coef, alpha=alpha)
 
 
+@dataclass
+class BaggedRidge:
+    """Mean forecast of ridge members fitted on bootstrap resamples of the training rows."""
+
+    members: list[RidgeModel]
+
+    def predict(self, w: Windows) -> np.ndarray:
+        out: np.ndarray = np.mean([m.predict(w) for m in self.members], axis=0)
+        return out
+
+
+def fit_bagged_ridge(w: Windows, alpha: float, n_members: int = 5) -> BaggedRidge:
+    """Bag `fit_ridge`: member k trains on `len(w)` rows drawn with replacement (seed k).
+
+    All members share `alpha`; nothing is re-tuned per member.
+    """
+    members = []
+    for k in range(n_members):
+        idx = np.random.default_rng(k).integers(0, len(w), size=len(w))
+        members.append(fit_ridge(Windows([w.dates[i] for i in idx], w.x[idx], w.y[idx]), alpha))
+    return BaggedRidge(members)
+
+
 RIDGE_ALPHAS = (0.1, 1.0, 10.0, 100.0, 1000.0)
 
 

@@ -21,7 +21,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
 | Eval | `evaluate.py` | perplexity, exact match, token F1, `Judge` protocol with an offline `MockJudge` (1-5), weighted `EvalReport` |
-| Prices | `price_data.py`, `price_model.py`, `price_eval.py` | Dutch day-ahead price forecasting: the same transformer blocks on continuous inputs, vs naive and ridge baselines, rolling-origin folds, bootstrap CI and Diebold-Mariano test |
+| Prices | `price_data.py`, `price_model.py`, `price_eval.py` | Dutch day-ahead price forecasting: the same transformer blocks on continuous inputs, vs naive, ridge and bagged-ridge baselines, rolling-origin folds, iid and moving-block bootstrap CIs and Diebold-Mariano test |
 
 ## Architecture
 
@@ -80,7 +80,7 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 76 passed, 1 deselected (network) in 20 s |
+| Unit tests | `pytest` | 78 passed, 1 deselected (network) in 38 s |
 
 ### Evaluation pipeline (course lesson 41)
 
@@ -160,14 +160,14 @@ How to read these results:
 
 ## Day-ahead electricity price forecasting
 
-**Verdict: the 5-seed transformer ensemble beats the best baseline (ridge on lags) by 1.41 EUR/MWh pooled MAE (6%). No single transformer does: each seed alone ties with ridge (table below).**
+**Verdict: the 5-seed transformer ensemble beats ridge on lags by 1.41 EUR/MWh pooled MAE (6%), and also a 5-member bagged ridge (by 1.94). The result survives a moving-block bootstrap that respects day-to-day dependence: block CI [-2.87, -0.20] vs ridge. No single transformer beats ridge: each seed alone shows no detectable difference (table below).**
 
 Task: at 12:00 on day D-1, forecast the 24 hourly NL day-ahead prices of day D (EUR/MWh) from the previous 7 days of prices. Every hour of D-1 is already public at that time, because the D-1 auction clears on D-2 around 13:00. Nothing at or after D 00:00 enters an input; `tests/test_minigpt_price.py` proves this two ways (inputs equal unix timestamps and all are before D 00:00 local, and overwriting every price from day k onward leaves the inputs of windows up to day k unchanged).
 
 ```bash
 uv run minigpt price-data                  # ~5 min, rate limit is 2 requests/min; cached in data/raw/
 uv run minigpt price-train --folds 12      # 12 monthly folds x 5 seeds, 10 min on MPS
-uv run minigpt price-eval --folds 12       # prints the tables below, writes runs/price/report.json
+uv run minigpt price-eval --folds 12       # prints the tables below, writes runs/price/report.json (existing checkpoints, offline)
 ```
 
 Data: [Energy-Charts API](https://api.energy-charts.info/) (Fraunhofer ISE), `/price?bzn=NL`, no token. Licence CC BY 4.0, data credited to Bundesnetzagentur | SMARD.de. Citation: *Energy-Charts API, Fraunhofer ISE, day-ahead prices, bidding zone NL, CC BY 4.0.* Range 2024-10-01 to 2026-10-15 (745 days), fetched 2026-10-16. `price-data` fixes the range, so a re-run fetches the same data.
@@ -179,24 +179,24 @@ Data: [Energy-Charts API](https://api.energy-charts.info/) (Fraunhofer ISE), `/p
 
 **Model.** `PriceTransformer` reuses `TransformerBlock` (causal attention + GELU MLP) and the GPT init from `model.py` unchanged. It drops `GPTModel`'s token embedding and weight-tied LM head and puts a linear projection of 6 continuous features plus a learned position embedding in front, and a linear regression head behind. The sequence is 168 history tokens (D-7..D-1) followed by 24 query tokens for D. The query tokens carry no price, only calendar features, so the causal mask cannot leak the target. Prices are standardised per window (mean and std of the 168 history hours) and the loss is L1 in EUR/MWh. 2 layers, d=64, 4 heads, dropout 0.1, 112,897 parameters, AdamW with cosine LR, early stopping on validation MAE. Each fold trains 5 seeds (about 10 s each on MPS) and the forecast is their mean.
 
-**Baselines.** Seasonal naive (same hour D-1), weekly naive (same hour D-7), and multi-output ridge on the same 168 normalised lags plus a weekday one-hot (alpha picked on validation from 0.1 to 1000).
+**Baselines.** Seasonal naive (same hour D-1), weekly naive (same hour D-7), and multi-output ridge on the same 168 normalised lags plus a weekday one-hot (alpha picked on validation from 0.1 to 1000). A fourth baseline, **bagged ridge (5)**, matches the transformer's 5-member ensemble: five ridges, each fitted on a bootstrap resample of the training rows (seeds 0 to 4) with the plain ridge's validation-picked alpha, forecasts averaged.
 
 **Protocol.** 12 consecutive monthly test folds, 2025-10 to 2026-09 (the last full month is the single held-out month asked for in the brief). For each fold, validation is the 28 days before the test month and training is everything before that; the model is retrained per fold and never refit on validation data. MAE, RMSE and sMAPE are over all test hours.
 
-| Fold | Days | Source res. | 15-min train days | seasonal naive (D-1) | weekly naive (D-7) | ridge on lags | transformer |
-|---|---|---|---|---|---|---|---|
-| 2025-10 | 31 | 15-min | 0/330 | 25.69 | 38.37 | 20.43 | 21.22 |
-| 2025-11 | 30 | 15-min | 3/361 | 21.63 | 27.33 | 17.68 | 17.18 |
-| 2025-12 | 31 | 15-min | 33/391 | 18.12 | 22.03 | 13.31 | 12.45 |
-| 2026-01 | 31 | 15-min | 64/422 | 21.22 | 23.75 | 17.87 | 17.26 |
-| 2026-02 | 28 | 15-min | 95/453 | 15.34 | 18.69 | 12.81 | 11.90 |
-| 2026-03 | 31 | 15-min | 123/481 | 37.56 | 41.26 | 26.05 | 26.21 |
-| 2026-04 | 30 | 15-min | 154/512 | 30.24 | 43.44 | 27.17 | 23.91 |
-| 2026-05 | 31 | 15-min | 184/542 | 24.86 | 34.22 | 25.27 | 22.10 |
-| 2026-06 | 30 | 15-min | 215/573 | 40.63 | 39.70 | 36.19 | 30.23 |
-| 2026-07 | 31 | 15-min | 245/603 | 24.66 | 31.95 | 20.32 | 20.59 |
-| 2026-08 | 31 | 15-min | 276/634 | 25.81 | 31.59 | 21.65 | 20.77 |
-| 2026-09 | 30 | 15-min | 307/665 | 44.24 | 51.20 | 32.99 | 30.87 |
+| Fold | Days | Source res. | 15-min train days | seasonal naive (D-1) | weekly naive (D-7) | ridge on lags | bagged ridge (5) | transformer |
+|---|---|---|---|---|---|---|---|---|
+| 2025-10 | 31 | 15-min | 0/330 | 25.69 | 38.37 | 20.43 | 21.16 | 21.22 |
+| 2025-11 | 30 | 15-min | 3/361 | 21.63 | 27.33 | 17.68 | 17.69 | 17.18 |
+| 2025-12 | 31 | 15-min | 33/391 | 18.12 | 22.03 | 13.31 | 14.23 | 12.45 |
+| 2026-01 | 31 | 15-min | 64/422 | 21.22 | 23.75 | 17.87 | 17.66 | 17.26 |
+| 2026-02 | 28 | 15-min | 95/453 | 15.34 | 18.69 | 12.81 | 13.02 | 11.90 |
+| 2026-03 | 31 | 15-min | 123/481 | 37.56 | 41.26 | 26.05 | 25.70 | 26.21 |
+| 2026-04 | 30 | 15-min | 154/512 | 30.24 | 43.44 | 27.17 | 27.44 | 23.91 |
+| 2026-05 | 31 | 15-min | 184/542 | 24.86 | 34.22 | 25.27 | 26.59 | 22.10 |
+| 2026-06 | 30 | 15-min | 215/573 | 40.63 | 39.70 | 36.19 | 38.69 | 30.23 |
+| 2026-07 | 31 | 15-min | 245/603 | 24.66 | 31.95 | 20.32 | 20.64 | 20.59 |
+| 2026-08 | 31 | 15-min | 276/634 | 25.81 | 31.59 | 21.65 | 21.74 | 20.77 |
+| 2026-09 | 30 | 15-min | 307/665 | 44.24 | 51.20 | 32.99 | 33.62 | 30.87 |
 
 Per-fold MAE in EUR/MWh. Every test month is in the 15-minute era, so fold 2025-10 trains on hourly-era data only and is tested on hourly means of 15-minute prices; the "15-min train days" column shows how that mix shifts across folds.
 
@@ -207,11 +207,20 @@ Pooled over 365 days (8,760 hours):
 | seasonal naive (D-1) | 27.53 | 44.87 | 41.7 |
 | weekly naive (D-7) | 33.68 | 53.11 | 48.2 |
 | ridge on lags | 22.66 | 35.82 | 34.9 |
+| bagged ridge (5) | 23.20 | 36.74 | 35.4 |
 | transformer (5-seed mean) | **21.25** | **35.53** | **33.9** |
 
-- Per-day MAE, transformer minus ridge (best baseline by pooled MAE): **-1.41 EUR/MWh**, 95% paired-bootstrap CI [-2.59, -0.28] (365 days, 10,000 resamples).
-- Diebold-Mariano with the Harvey-Leybourne-Newbold correction on the same daily differences (h=1): statistic -2.41, p = 0.016. The transformer has the lower MAE in 9 of 12 folds.
-- Verdict rule: "beats" needs DM p < 0.05 and a bootstrap CI that excludes zero in the same direction; otherwise "ties".
+Per-day MAE, transformer minus baseline (negative = transformer better), 365 days, 10,000 resamples, 95% CIs. "iid" resamples days independently; "block" is a moving-block bootstrap with 7-day blocks (one weekly cycle, fixed before any result in `docs/protocol-block-bootstrap.md`) and is the CI the verdict uses.
+
+| Baseline | Diff | iid CI | block CI (7 d) | DM-HLN p | Transformer better in folds |
+|---|---|---|---|---|---|
+| ridge on lags (best baseline by pooled MAE) | -1.41 | [-2.59, -0.28] | [-2.87, -0.20] | 0.016 | 9 of 12 |
+| bagged ridge (5) | -1.94 | [-3.28, -0.72] | [-3.65, -0.57] | 0.003 | 10 of 12 |
+
+- Diebold-Mariano with the Harvey-Leybourne-Newbold correction on the same daily differences (h=1): statistic -2.41 vs ridge, -2.99 vs bagged ridge.
+- Verdict rule (pre-registered): "beats" needs, against both ridge variants, DM p < 0.05 and both the iid and the 7-day block CI excluding zero on the same side; otherwise "no detectable difference". All four tests pass, so the verdict stays "beats".
+- Post-hoc block-length check (3 and 14 days, not part of the rule) gives similar intervals vs ridge: [-2.73, -0.27] and [-2.79, -0.25]; vs bagged ridge [-3.45, -0.70] and [-3.59, -0.62].
+- Bagging did not help ridge: bagged ridge is worse than plain ridge (23.20 vs 22.66 MAE). Ridge is already a low-variance, regularised fit, so resampling the training rows mostly costs data. The matched baseline therefore does not make the comparison harder; it only shows that ensembling alone does not explain the transformer's margin over linear models.
 
 Caveats:
 - **Ensemble vs single model.** Each member scored alone against ridge with the same paired bootstrap and DM-HLN test (printed by `price-eval`):
@@ -224,12 +233,12 @@ Caveats:
   | 3 | 22.62 | -0.04 | [-1.27, +1.17] | 0.948 |
   | 4 | 22.36 | -0.30 | [-1.44, +0.85] | 0.613 |
 
-  Every single model ties with ridge; the significant margin exists only for the ensemble, and ridge is not ensembled.
-- **Dependence.** Both tests treat days as exchangeable (bootstrap) or use no autocorrelation correction at h=1 (DM). Adjacent days are correlated, so the CI and p-value are probably somewhat optimistic. Folds are not independent either.
+  Every single model shows no detectable difference from ridge; the significant margin exists only for the ensemble. The bagged-ridge row above is the matched-ensemble control. These single-seed rows use the iid bootstrap and DM only.
+- **Dependence.** The iid bootstrap treats days as exchangeable and DM-HLN uses no autocorrelation correction at h=1. The 7-day moving-block CI vs ridge is 16% wider than the iid one (width 2.67 vs 2.31 EUR/MWh) but still excludes zero. DM p = 0.016 has no such correction, so it remains the optimistic number. Block lengths 3 and 14 agree. Folds are not independent either, and 365 days of one market regime is a short sample.
 - **Small models, small data.** 330 to 665 training days, one hyperparameter setting, one price regime. I probed four variants (d=32, dropout 0.2, 1 layer, lower LR) on one 28-day validation window; none was clearly better, so the defaults stayed. That window (Aug 2026) is also the test month of fold 2026-08, so treat that fold as very slightly less clean.
 - **sMAPE** is unreliable here: 435 of the 8,760 test hours have a negative price and 526 have |price| < 5 EUR/MWh, where a small EUR error becomes a huge percentage. Use MAE and RMSE.
 - **Weak spots.** Errors are largest in months with high price volatility (2026-03, 2026-06, 2026-09). Single country, no exogenous inputs, no real-time or intraday evaluation.
-- **Reproducibility.** Seeds are fixed. A second full `price-train --folds 12` then `price-eval --folds 12` on the same Mac (MPS) reproduced every number above exactly; other devices may differ in the last digits.
+- **Reproducibility.** Seeds are fixed. A second full `price-train --folds 12` then `price-eval --folds 12` on the same Mac (MPS) reproduced every transformer and baseline number above exactly. The bagged-ridge and block-bootstrap columns were added later: `price-eval` re-run on the existing checkpoints reproduced every earlier `report.json` number exactly (compared field by field) and is deterministic given seeds; other devices may differ in the last digits.
 
 ### Probabilistic forecasts (quantiles)
 
