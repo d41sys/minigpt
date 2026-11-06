@@ -21,7 +21,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from minigpt.bpe import BPETokenizer
-from minigpt.data import create_dataloader
+from minigpt.data import create_dataloader, split_val_test
 from minigpt.dpo import (
     PreferenceDataset,
     PreferenceSample,
@@ -74,7 +74,14 @@ from minigpt.sft import (
     sft_collate_fn,
     train_sft,
 )
-from minigpt.train import get_device, load_model, save_checkpoint, train
+from minigpt.train import (
+    get_device,
+    load_checkpoint,
+    load_model,
+    save_checkpoint,
+    train,
+    window_losses,
+)
 
 TINY_SHAKESPEARE_URL = (
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -153,27 +160,61 @@ def cmd_train_tokenizer(args: argparse.Namespace) -> None:
     )
 
 
+def half_losses(
+    model: GPTModel, halves: dict[str, list[int]], batch_size: int, device: torch.device
+) -> dict[str, list[float]]:
+    """Per-window loss of every non-overlapping window of each token half (dropout off)."""
+    model.to(device)
+    return {
+        name: window_losses(
+            model,
+            create_dataloader(
+                ids, model.config.context_length, batch_size, shuffle=False, drop_last=False
+            ),
+            device,
+        )
+        for name, ids in halves.items()
+    }
+
+
+def format_half_losses(losses: dict[str, list[float]]) -> str:
+    parts = [
+        f"{name} loss={np.mean(v):.4f} ppl={np.exp(np.mean(v)):.2f} (n={len(v)} windows)"
+        for name, v in losses.items()
+    ]
+    return "  ".join(parts)
+
+
 def cmd_pretrain(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
     if args.data != "tinyshakespeare":
         sys.exit("only --data tinyshakespeare is bundled")
     tok = load_tokenizer()
-    train_ids, val_ids = shakespeare_splits(tok)
-    print(f"device={device} train_tokens={len(train_ids):,} val_tokens={len(val_ids):,}")
+    train_ids, held_ids = shakespeare_splits(tok)
+    val_ids, test_ids = split_val_test(held_ids)
+    print(
+        f"device={device} train_tokens={len(train_ids):,} "
+        f"val_tokens={len(val_ids):,} test_tokens={len(test_ids):,}"
+    )
     cfg = GPTConfig(
         vocab_size=tok.vocab_size,
         context_length=args.context_length,
         d_model=args.d_model,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
-        dropout=0.1,
+        dropout=args.dropout,
         use_sdpa=True,
     )
     model = GPTModel(cfg)
     print(f"params={sum(p.numel() for p in model.parameters()):,}")
-    train_loader = create_dataloader(train_ids, cfg.context_length, args.batch_size, shuffle=True)
-    val_loader = create_dataloader(val_ids, cfg.context_length, args.batch_size, shuffle=False)
+    stride = 1 if args.sampling == "random" else None
+    train_loader = create_dataloader(
+        train_ids, cfg.context_length, args.batch_size, stride=stride, shuffle=True
+    )
+    val_loader = create_dataloader(
+        val_ids, cfg.context_length, args.batch_size, shuffle=False, drop_last=False
+    )
     res = train(
         model,
         train_loader,
@@ -193,6 +234,43 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     v0, v1 = res["initial_val_loss"], res["final_val_loss"]
     print(f"val loss step0={v0:.4f} best={v1:.4f} drop={(v0 - v1) / v0 * 100:.1f}%")
     print(f"checkpoint -> {res['checkpoint_path']}")
+    ckpt = Path(res["checkpoint_path"])
+    if not ckpt.exists():
+        print("no checkpoint beat the step-0 val loss; test loss not computed")
+        return
+    payload = load_checkpoint(ckpt, model, device=device)
+    losses = half_losses(model, {"val": val_ids, "test": test_ids}, args.batch_size, device)
+    print(f"val-selected checkpoint (step {payload['step']}): {format_half_losses(losses)}")
+    if args.results_out:
+        out = Path(args.results_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "name": args.name,
+            "seed": args.seed,
+            "sampling": args.sampling,
+            "dropout": args.dropout,
+            "steps": args.steps,
+            "selected_step": payload["step"],
+            "initial_val_loss": v0,
+            "history": res["history"],
+            "val_window_losses": losses["val"],
+            "test_window_losses": losses["test"],
+            "val_loss": float(np.mean(losses["val"])),
+            "test_loss": float(np.mean(losses["test"])),
+        }
+        out.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+        print(f"results -> {out}")
+
+
+def cmd_pretrain_eval(args: argparse.Namespace) -> None:
+    """Val-half and test-half loss of any pretraining checkpoint."""
+    device = get_device()
+    tok = load_tokenizer()
+    _, held_ids = shakespeare_splits(tok)
+    val_ids, test_ids = split_val_test(held_ids)
+    model = load_model(require(Path(args.checkpoint), "pretrain"))
+    losses = half_losses(model, {"val": val_ids, "test": test_ids}, args.batch_size, device)
+    print(f"{args.checkpoint}: {format_half_losses(losses)}")
 
 
 def cmd_finetune_cls(args: argparse.Namespace) -> None:
@@ -567,7 +645,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lr", type=float, default=1e-3)
     s.add_argument("--eval-interval", type=int, default=200)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--dropout", type=float, default=0.1)
+    s.add_argument(
+        "--sampling",
+        choices=["aligned", "random"],
+        default="aligned",
+        help="train windows: aligned (stride = context length) or random offsets (stride 1)",
+    )
+    s.add_argument("--results-out", default=None, help="write per-run JSON (losses, history)")
     s.set_defaults(func=cmd_pretrain)
+
+    s = sub.add_parser("pretrain-eval", help="val-half and test-half loss of a checkpoint")
+    s.add_argument("--checkpoint", default=str(PRETRAIN_CKPT))
+    s.add_argument("--batch-size", type=int, default=32)
+    s.set_defaults(func=cmd_pretrain_eval)
 
     s = sub.add_parser("finetune-cls", help="spam classifier via head swap")
     s.add_argument("--base", default=str(PRETRAIN_CKPT))
