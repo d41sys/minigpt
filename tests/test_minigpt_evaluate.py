@@ -1,8 +1,17 @@
 import math
 
+import numpy as np
 import pytest
 
-from minigpt.evaluate import EvalReport, MockJudge, exact_match, normalize_answer, token_f1
+from minigpt.evaluate import (
+    EvalReport,
+    MockJudge,
+    exact_match,
+    holm_adjust,
+    normalize_answer,
+    paired_bootstrap_test,
+    token_f1,
+)
 
 
 def test_normalize_answer_drops_case_punctuation_articles() -> None:
@@ -57,3 +66,20 @@ def test_aggregate_is_weighted_mean() -> None:
     assert r.aggregate() == pytest.approx((0.5 + 0.2 + 0.4 + 0.5) / 4)
     assert r.aggregate((1.0, 0.0, 0.0, 0.0)) == pytest.approx(0.5)
     assert r.aggregate((0.0, 1.0, 3.0, 0.0)) == pytest.approx((0.2 + 3 * 0.4) / 4)
+
+
+def test_holm_adjust_hand_computed() -> None:
+    # sorted p: 0.01 (x3), 0.02 (x2), 0.04 (x1) -> 0.03, 0.04, 0.04 (monotone)
+    assert holm_adjust([0.04, 0.01, 0.02]) == pytest.approx([0.04, 0.03, 0.04])
+    assert holm_adjust([0.9, 0.6]) == pytest.approx([1.0, 1.0])  # 2 * 0.6 capped, then monotone
+
+
+def test_paired_bootstrap_test_separates_shift_from_noise() -> None:
+    rng = np.random.default_rng(1)
+    shifted = rng.normal(0.5, 0.1, 100)
+    mean, lo, hi, p = paired_bootstrap_test(shifted)
+    assert mean == pytest.approx(shifted.mean()) and 0 < lo < mean < hi and p < 0.001
+    centred = rng.normal(0.0, 0.1, 100)
+    centred -= centred.mean()
+    _, lo, hi, p = paired_bootstrap_test(centred)
+    assert lo < 0 < hi and p > 0.5

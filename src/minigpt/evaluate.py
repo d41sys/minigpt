@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Protocol
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -135,6 +136,35 @@ def token_f1(prediction: str, reference: str) -> float:
         return 0.0
     precision, recall = overlap / len(pred), overlap / len(ref)
     return 2 * precision * recall / (precision + recall)
+
+
+def paired_bootstrap_test(
+    diff: np.ndarray, n_boot: int = 10_000, seed: int = 0
+) -> tuple[float, float, float, float]:
+    """Mean of paired per-row differences, its 95% percentile CI and a two-sided bootstrap p.
+
+    Rows are resampled i.i.d. with replacement; the same `seed` gives the same row draws for
+    every set of differences of equal length. p = 2 * min(P(mean* <= 0), P(mean* >= 0)) with the
+    add-one correction, capped at 1, so it is never exactly 0.
+    """
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, diff.size, size=(n_boot, diff.size))
+    means = diff[idx].mean(axis=1)
+    lo, hi = np.percentile(means, [2.5, 97.5])
+    p_le = (int((means <= 0).sum()) + 1) / (n_boot + 1)
+    p_ge = (int((means >= 0).sum()) + 1) / (n_boot + 1)
+    return float(diff.mean()), float(lo), float(hi), min(1.0, 2 * min(p_le, p_ge))
+
+
+def holm_adjust(pvalues: list[float]) -> list[float]:
+    """Holm step-down adjusted p-values (monotone, capped at 1), in the input order."""
+    order = sorted(range(len(pvalues)), key=pvalues.__getitem__)
+    adjusted = [0.0] * len(pvalues)
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, (len(pvalues) - rank) * pvalues[i])
+        adjusted[i] = min(1.0, running)
+    return adjusted
 
 
 class MockJudge:

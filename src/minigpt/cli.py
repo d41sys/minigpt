@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -33,6 +34,8 @@ from minigpt.evaluate import (
     MockJudge,
     compute_perplexity,
     exact_match,
+    holm_adjust,
+    paired_bootstrap_test,
     token_f1,
 )
 from minigpt.finetune_cls import (
@@ -291,6 +294,43 @@ def cmd_dpo(args: argparse.Namespace) -> None:
 
 
 SHORT_ANSWER_MAX_WORDS = 5  # held-out rows with references this short form the EM set
+DEFAULT_EVAL_N = 50  # default `eval --n`; the paired table also reports F1 on these first rows
+
+
+def paired_f1_table(
+    f1_by_name: dict[str, list[float]], baseline: str, n_boot: int = 10_000, seed: int = 0
+) -> list[dict[str, Any]]:
+    """Each model minus `baseline` on per-row token F1: paired bootstrap CI, p, Holm over models.
+
+    A model is `different` only if its 95% CI excludes 0 and its Holm-adjusted p is below 0.05.
+    """
+    base = np.asarray(f1_by_name[baseline])
+    names = [name for name in f1_by_name if name != baseline]
+    tests = [
+        paired_bootstrap_test(np.asarray(f1_by_name[name]) - base, n_boot=n_boot, seed=seed)
+        for name in names
+    ]
+    holm = holm_adjust([t[3] for t in tests])
+    rows = []
+    for name, (mean, lo, hi, p), p_holm in zip(names, tests, holm, strict=True):
+        scores = f1_by_name[name]
+        verdict = "no detectable difference"
+        if (lo > 0 or hi < 0) and p_holm < 0.05:
+            verdict = "different (better)" if mean > 0 else "different (worse)"
+        rows.append(
+            {
+                "model": name,
+                "f1": float(np.mean(scores)),
+                "f1_first": float(np.mean(scores[:DEFAULT_EVAL_N])),
+                "diff": mean,
+                "ci_lo": lo,
+                "ci_hi": hi,
+                "p": p,
+                "p_holm": p_holm,
+                "verdict": verdict,
+            }
+        )
+    return rows
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
@@ -303,6 +343,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
     open_form = heldout[: args.n]
     judge: Judge = MockJudge()
     weights = (args.w_ppl, args.w_em, args.w_f1, args.w_judge)
+    f1_rows: dict[str, list[float]] = {}
+    responses_by_name: dict[str, list[str]] = {}
 
     print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
     print(
@@ -330,6 +372,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
         em = [exact_match(sample_response(model, tok, r, device), r["output"]) for r in short]
         responses = [sample_response(model, tok, r, device) for r in open_form]
         f1 = [token_f1(p, r["output"]) for p, r in zip(responses, open_form, strict=True)]
+        f1_rows[name] = f1
+        responses_by_name[name] = responses
         scores = [
             judge.score(r["instruction"], p, r["output"])
             for p, r in zip(responses, open_form, strict=True)
@@ -349,6 +393,40 @@ def cmd_eval(args: argparse.Namespace) -> None:
             f"{report.exact_match:.3f} | "
             f"{report.token_f1:.3f} | {report.judge_mean:.2f} | {report.aggregate(weights):.3f} |"
         )
+    if args.rows_out:
+        out = Path(args.rows_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(
+                {
+                    "n": len(open_form),
+                    "token_f1": f1_rows,
+                    "responses": responses_by_name,
+                    "references": [r["output"] for r in open_form],
+                }
+            )
+        )
+        print(f"\nper-row token F1 and responses -> {out}")
+    if args.paired_vs:
+        if args.paired_vs not in f1_rows:
+            raise SystemExit(f"--paired-vs {args.paired_vs!r} is not a scored checkpoint")
+        n_boot = 10_000
+        print(
+            f"\nPaired bootstrap on per-row token F1 vs {args.paired_vs} "
+            f"(n={len(open_form)} rows, {n_boot} resamples, seed 0, Holm over "
+            f"{len(f1_rows) - 1} models):"
+        )
+        print(
+            f"| Model | F1 (n={len(open_form)}) | F1 (first {DEFAULT_EVAL_N}) | diff vs "
+            f"{args.paired_vs} | 95% CI | p | p (Holm) | verdict |"
+        )
+        print("|---|---|---|---|---|---|---|---|")
+        for row in paired_f1_table(f1_rows, args.paired_vs, n_boot=n_boot):
+            print(
+                f"| {row['model']} | {row['f1']:.3f} | {row['f1_first']:.3f} | "
+                f"{row['diff']:+.4f} | [{row['ci_lo']:+.4f}, {row['ci_hi']:+.4f}] | "
+                f"{row['p']:.4f} | {row['p_holm']:.4f} | {row['verdict']} |"
+            )
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -523,7 +601,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_dpo)
 
     s = sub.add_parser("eval", help="perplexity + EM + token F1 + mock judge, weighted")
-    s.add_argument("--n", type=int, default=50, help="held-out Alpaca rows for F1 and judge")
+    s.add_argument(
+        "--n",
+        type=int,
+        default=DEFAULT_EVAL_N,
+        help="held-out Alpaca rows for F1 and judge (100 = all held-out rows)",
+    )
     s.add_argument("--w-ppl", type=float, default=1.0)
     s.add_argument("--w-em", type=float, default=1.0)
     s.add_argument("--w-f1", type=float, default=1.0)
@@ -538,6 +621,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="comma-separated name=path list (default: pretrain, sft, dpo)",
     )
+    s.add_argument(
+        "--paired-vs",
+        default=None,
+        help="checkpoint name to subtract: paired bootstrap CI of per-row token F1 for the "
+        "others, Holm-adjusted across them",
+    )
+    s.add_argument("--rows-out", default=None, help="write per-row token F1 and responses (JSON)")
     s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("price-data", help="download NL day-ahead prices (Energy-Charts)")
