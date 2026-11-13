@@ -39,7 +39,7 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=9.2.0", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.ruff]
 line-length = 100
