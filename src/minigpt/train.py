@@ -142,7 +142,9 @@ def load_checkpoint(
     device: torch.device | None = None,
 ) -> dict[str, Any]:
     """Load training checkpoint into model and optional optimizer."""
-    payload: dict[str, Any] = torch.load(path, map_location=device or torch.device("cpu"))
+    payload: dict[str, Any] = torch.load(
+        path, map_location=device or torch.device("cpu"), weights_only=True
+    )
     model.load_state_dict(payload["model_state_dict"])
     if optimizer is not None and "optimizer_state_dict" in payload:
         optimizer.load_state_dict(payload["optimizer_state_dict"])
@@ -151,7 +153,9 @@ def load_checkpoint(
 
 def load_model(path: str | Path, device: torch.device | None = None) -> GPTModel:
     """Rebuild a GPTModel from a checkpoint (config + weights)."""
-    payload: dict[str, Any] = torch.load(path, map_location=device or torch.device("cpu"))
+    payload: dict[str, Any] = torch.load(
+        path, map_location=device or torch.device("cpu"), weights_only=True
+    )
     model = GPTModel(GPTConfig(**payload["config"]))
     model.load_state_dict(payload["model_state_dict"])
     return model

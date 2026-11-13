@@ -7,11 +7,16 @@ name = "minigpt"
 version = "0.1.0"
 description = "GPT from scratch: byte-level BPE, transformer model, pretraining, fine-tuning, SFT, and DPO"
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Tien-Dat Le" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.4",
     "numpy",
 ]
+
+[project.urls]
+Repository = "https://github.com/d41sys/minigpt"
 
 [project.optional-dependencies]
 hf = [
