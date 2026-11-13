@@ -107,7 +107,7 @@ class RougeLJudge:
         }
 
 
-# --- Lesson 41: exact match, token F1, mock judge, weighted report -----------------
+# --- Exact match, token F1, mock judge, weighted report -----------------
 
 _ARTICLES = re.compile(r"\b(a|an|the)\b")
 _PUNCT = re.compile(r"[^\w\s]")
