@@ -6,7 +6,6 @@ A small GPT built step by step in PyTorch: a byte-level BPE tokenizer, the
 transformer, pretraining, loading real GPT-2 weights, classifier fine-tuning, SFT
 and DPO. Only `torch.nn` primitives are used (Linear, Embedding, LayerNorm). The
 tokenizer, attention, training loop, loss masking and DPO loss are all written here.
-Curriculum lessons 30–41 of *AI Engineering from Scratch*.
 
 ## Problem
 
@@ -98,7 +97,7 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
 | Unit tests | `pytest` | 90 passed, 1 deselected (network) in 19 s |
 
-### Evaluation pipeline (course lesson 41)
+### Evaluation pipeline
 
 `minigpt eval` runs four evals on every checkpoint and combines them into one weighted score:
 

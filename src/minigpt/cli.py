@@ -421,7 +421,7 @@ def paired_f1_table(
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
-    """Lesson-41 report: perplexity, exact match, token F1, mock judge, weighted aggregate."""
+    """Eval report: perplexity, exact match, token F1, mock judge, weighted aggregate."""
     device = get_device()
     tok = load_tokenizer()
     _, val_ids = shakespeare_splits(tok)
