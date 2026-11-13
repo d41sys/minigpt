@@ -1,5 +1,7 @@
 # minigpt — GPT from scratch
 
+[![CI](https://github.com/d41sys/minigpt/actions/workflows/ci.yml/badge.svg)](https://github.com/d41sys/minigpt/actions/workflows/ci.yml)
+
 A small GPT built step by step in PyTorch: a byte-level BPE tokenizer, the
 transformer, pretraining, loading real GPT-2 weights, classifier fine-tuning, SFT
 and DPO. Only `torch.nn` primitives are used (Linear, Embedding, LayerNorm). The
@@ -45,6 +47,17 @@ flowchart LR
     SCK & DPO --> EV[eval: ppl + EM + token F1 + judge, weighted]
 ```
 
+## Data and licences
+
+Nothing is redistributed; every dataset is downloaded at run time from its source.
+
+| Data | Source | Licence |
+|---|---|---|
+| tiny-Shakespeare | [karpathy/char-rnn](https://github.com/karpathy/char-rnn) | public-domain text |
+| Alpaca (SFT, DPO) | [tatsu-lab/stanford_alpaca](https://github.com/tatsu-lab/stanford_alpaca) | CC BY-NC 4.0, research use only; so are the SFT and DPO checkpoints derived from it |
+| SMS Spam Collection | [UCI ML Repository](https://archive.ics.uci.edu/dataset/228/sms+spam+collection) | CC BY 4.0 |
+| GPT-2 124M weights | [Hugging Face `gpt2`](https://huggingface.co/openai-community/gpt2) | OpenAI's modified MIT licence |
+
 ## Quickstart
 
 Run from the repo root. Downloads go to `data/raw/`, outputs to `runs/` (both gitignored).
@@ -61,7 +74,7 @@ uv run minigpt eval
 uv run minigpt eval --n 100 --paired-vs sft --checkpoints sft=runs/sft/ckpt.pt,dpo=runs/dpo/ckpt.pt
 ```
 
-Tests: `uv run pytest -q`. The GPT-2 parity test
+Tests: `uv run pytest -q` (CI runs ruff, mypy and pytest on every push and PR). Release: push a tag `vX.Y.Z` matching `pyproject.toml`'s version; CI reruns, then the wheel and sdist are attached to a GitHub Release. The GPT-2 parity test
 needs internet and the extras:
 `uv run --extra hf --extra test pytest -m network`.
 
@@ -81,7 +94,7 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 90 passed, 1 deselected (network) in 15 s |
+| Unit tests | `pytest` | 90 passed, 1 deselected (network) in 19 s |
 
 ### Evaluation pipeline (course lesson 41)
 

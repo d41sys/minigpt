@@ -15,4 +15,3 @@ data/raw/
 runs/
 *.pt
 *.safetensors
-.ragkit/
