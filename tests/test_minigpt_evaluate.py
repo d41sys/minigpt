@@ -1,11 +1,16 @@
+import io
+import json
 import math
+from typing import Any
 
 import numpy as np
 import pytest
 
+from minigpt import evaluate
 from minigpt.evaluate import (
     EvalReport,
     MockJudge,
+    OllamaJudge,
     exact_match,
     holm_adjust,
     normalize_answer,
@@ -38,6 +43,39 @@ def test_mock_judge_bounds() -> None:
     assert judge.score("q", "", "anything") == 1
     assert judge.score("q", "zzz", "the cat sat") == 1
     assert judge.score("q", "the cat sat", "the cat sat") == 5
+
+
+def _fake_ollama(monkeypatch: pytest.MonkeyPatch, content: str) -> list[dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+
+    def urlopen(req: Any, timeout: float) -> io.BytesIO:
+        sent.append({"url": req.full_url, **json.loads(req.data)})
+        return io.BytesIO(json.dumps({"message": {"content": content}}).encode())
+
+    monkeypatch.setattr(evaluate.urllib.request, "urlopen", urlopen)
+    return sent
+
+
+def test_ollama_judge_sends_deterministic_schema_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _fake_ollama(monkeypatch, '{"score": 4}')
+    judge = OllamaJudge("http://h:1/", "qwen", seed=7)
+    assert judge.score("Name a fruit.", "An apple.", "Apple") == 4
+    (req,) = sent
+    assert req["url"] == "http://h:1/api/chat"
+    assert req["model"] == "qwen" and req["think"] is False and req["stream"] is False
+    assert req["options"] == {"temperature": 0, "seed": 7, "num_ctx": 4096}
+    assert req["format"]["properties"]["score"] == {"type": "integer", "minimum": 1, "maximum": 5}
+    prompt = req["messages"][0]["content"]
+    assert "Name a fruit." in prompt and "Apple" in prompt and "An apple." in prompt
+
+
+def test_ollama_judge_rejects_bad_reply_and_skips_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _fake_ollama(monkeypatch, '{"score": 9}')
+    judge = OllamaJudge("http://h:1", "qwen")
+    with pytest.raises(ValueError, match="1-5"):
+        judge.score("q", "something", "ref")
+    assert judge.score("q", "   ", "ref") == 1
+    assert len(sent) == 1  # the empty response made no call
 
 
 def _report(**kw: float) -> EvalReport:

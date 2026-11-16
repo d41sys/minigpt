@@ -21,7 +21,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
-| Eval | `evaluate.py` | perplexity, exact match, token F1, `Judge` protocol with an offline `MockJudge` (1-5), weighted `EvalReport` |
+| Eval | `evaluate.py` | perplexity, exact match, token F1, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
 
 ## Architecture
 
@@ -102,7 +102,7 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 - **Perplexity** on the held-out Alpaca responses (prompt tokens masked), mapped to [0, 1] as `1 − ln(ppl) / ln(vocab)` (1 = perfect, 0 = uniform guessing). Shakespeare perplexity is printed alongside but not aggregated.
 - **Exact match** (SQuAD normalisation) on held-out Alpaca rows whose reference has ≤ 5 words (12 rows).
 - **Token F1** on the first 50 held-out Alpaca rows by default; `--n 100` scores all 100 held-out rows.
-- **Mock judge** (1–5) on the same rows. `MockJudge` maps ROUGE-L F1 onto the rubric. It fills the `Judge` protocol slot offline; it is not a quality judgement and duplicates token F1 (both measure lexical overlap), so it is printed but **not aggregated** by default.
+- **Judge** (1–5) on the same rows. The default `MockJudge` maps ROUGE-L F1 onto the rubric so the eval runs offline; it duplicates token F1, so it is printed but **not aggregated**. `--judge ollama` swaps in a real LLM judge (`OllamaJudge`, see "Real LLM judge" below), which is aggregated by default.
 
 The aggregate is the unweighted mean of perplexity score, EM and token F1 (`--w-ppl --w-em --w-f1` default 1, `--w-judge` default 0). `minigpt eval --checkpoints pretrain=runs/pretrain/ckpt.pt,sft=...`. Add `--paired-vs sft` for a paired bootstrap CI of each other checkpoint's per-row token F1 minus SFT (95% percentile CI, 10,000 row resamples, bootstrap p Holm-adjusted across the compared checkpoints) and `--rows-out PATH` to save per-row F1 and responses:
 
@@ -118,6 +118,33 @@ Reading, as measured:
 - SFT cuts held-out Alpaca perplexity tenfold (409 → 39) and doubles Shakespeare perplexity (40 → 93): it learns the instruction format and forgets the pretraining domain. Almost all of the aggregate gain comes from this perplexity term.
 - A 5M-parameter model trained on 900 instructions gets no exact match and near-floor F1; the generation metrics barely separate the checkpoints.
 - An earlier version of this table measured perplexity on Shakespeare only, which ranked pretrain first. That compared the models on a domain SFT is meant to leave, so it was replaced.
+
+#### Real LLM judge: Qwen 3.6 27B
+
+`minigpt eval --judge ollama --judge-url http://HOST:11434 --judge-model qwen3.6:27b-ctx4k` scores each response against its reference with a fixed 1–5 rubric (`JUDGE_RUBRIC` in `evaluate.py`). The call uses Ollama's native `/api/chat` with temperature 0, seed 0, thinking off and a JSON schema that only admits an integer 1–5; any other reply raises instead of being guessed.
+
+Run: the whole pipeline above retrained on one RTX 4090 (`device=cuda`, torch 2.13 cu129), then scored on all 100 held-out rows with `qwen3.6:27b-ctx4k` (Ollama model ID `7d4e56429f65`, Q4). Script, environment, per-row scores and every response: [`docs/judge-eval/`](docs/judge-eval/).
+
+| Model | Alpaca ppl | Shakespeare ppl | EM (n=12) | Token F1 (n=100) | Qwen judge (n=100) | Aggregate (4 parts) |
+|---|---|---|---|---|---|---|
+| pretrain | 404.97 | 40.00 | 0.000 | 0.042 | 1.00 | 0.044 |
+| sft | 39.92 | 93.41 | 0.000 | 0.046 | 1.00 | 0.129 |
+| dpo β=0.05 | 42.51 | 90.51 | 0.000 | 0.062 | 1.00 | 0.130 |
+| dpo β=0.1 | 41.61 | 90.16 | 0.000 | 0.057 | 1.00 | 0.130 |
+| dpo β=0.5 | 39.50 | 91.04 | 0.000 | 0.061 | 1.00 | 0.133 |
+
+**The judge gives 1 to all 500 responses.** Two checks show this is a verdict, not a stuck judge ([`judge_check.json`](docs/judge-eval/judge_check.json)):
+
+| Check (100 held-out rows) | Expected | Mean score | Share |
+|---|---|---|---|
+| Reference answer judged against itself | 5 | 4.88 | 97% score 5 |
+| Another row's reference judged against this row's | 1 | 1.00 | 100% score 1 |
+
+What it changes:
+- **Token F1 differences are filler-word overlap.** The five highest-F1 responses (F1 ≈ 0.25) are text like "The collollolly of the collollos of the 10000…". Their overlap with the reference is "the", "of", "is".
+- **The token-F1 verdict flips with the hardware.** On this CUDA run the paired test calls DPO β=0.05 and β=0.5 *better* than SFT (Δ +0.016 and +0.015, Holm p 0.049 and 0.007); on the earlier MPS run every DPO variant was at or below SFT. Same seeds and datasets; the floating-point paths differ, and so do the preference pairs sampled from each SFT model. The sign flips. A metric whose significant result reverses across devices is measuring noise in gibberish, so neither verdict says anything about quality.
+- **All five checkpoints are at the judge's floor.** SFT and DPO change perplexity and the answer format, not answer quality, at 5M parameters trained on Shakespeare. Rank agreement between judge and token F1 is undefined because every judge score is the same.
+- Training on CUDA reproduced the MPS run closely: SFT loss 4.292 → 3.474 (MPS 4.286 → 3.453), DPO β=0.1 epoch-2 loss 0.2412 and reward accuracy 0.940 (MPS 0.2427, 0.940), pretrain test loss 3.844 (MPS 3.875).
 
 Pretrain log (excerpt; seed 0, `--sampling aligned --dropout 0.1`, the recipe that produced `runs/pretrain/ckpt.pt`; val = first half of the held-out 10%):
 

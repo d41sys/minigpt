@@ -30,6 +30,7 @@ from minigpt.evaluate import (
     EvalReport,
     Judge,
     MockJudge,
+    OllamaJudge,
     compute_perplexity,
     exact_match,
     holm_adjust,
@@ -365,7 +366,7 @@ DEFAULT_EVAL_N = 50  # default `eval --n`; the paired table also reports F1 on t
 def paired_f1_table(
     f1_by_name: dict[str, list[float]], baseline: str, n_boot: int = 10_000, seed: int = 0
 ) -> list[dict[str, Any]]:
-    """Each model minus `baseline` on per-row token F1: paired bootstrap CI, p, Holm over models.
+    """Each model minus `baseline` on a per-row metric: paired bootstrap CI, p, Holm over models.
 
     A model is `different` only if its 95% CI excludes 0 and its Holm-adjusted p is below 0.05.
     """
@@ -399,7 +400,7 @@ def paired_f1_table(
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
-    """Eval report: perplexity, exact match, token F1, mock judge, weighted aggregate."""
+    """Eval report: perplexity, EM, token F1, judge (mock or Ollama), weighted aggregate."""
     device = get_device()
     tok = load_tokenizer()
     _, val_ids = shakespeare_splits(tok)
@@ -407,14 +408,20 @@ def cmd_eval(args: argparse.Namespace) -> None:
     short = [r for r in heldout if len(r["output"].split()) <= SHORT_ANSWER_MAX_WORDS]
     open_form = heldout[: args.n]
     judge: Judge = MockJudge()
-    weights = (args.w_ppl, args.w_em, args.w_f1, args.w_judge)
+    judge_label = "Mock judge (ROUGE-L, 1-5)"
+    if args.judge == "ollama":
+        judge = OllamaJudge(args.judge_url, args.judge_model)
+        judge_label = f"Judge ({args.judge_model}, 1-5)"
+    w_judge = args.w_judge if args.w_judge is not None else float(args.judge == "ollama")
+    weights = (args.w_ppl, args.w_em, args.w_f1, w_judge)
+    judge_rows: dict[str, list[int]] = {}
     f1_rows: dict[str, list[float]] = {}
     responses_by_name: dict[str, list[str]] = {}
 
     print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
     print(
         "\n| Model | Alpaca ppl (held-out responses) | Shakespeare ppl | EM | Token F1 "
-        "| Mock judge (ROUGE-L, 1-5) | Aggregate |"
+        f"| {judge_label} | Aggregate |"
     )
     print("|---|---|---|---|---|---|---|")
     checkpoints = [("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)]
@@ -443,6 +450,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
             judge.score(r["instruction"], p, r["output"])
             for p, r in zip(responses, open_form, strict=True)
         ]
+        judge_rows[name] = scores
         report = EvalReport(
             perplexity=compute_perplexity(model, alpaca, device),
             vocab_size=model.config.vocab_size,
@@ -466,32 +474,38 @@ def cmd_eval(args: argparse.Namespace) -> None:
                 {
                     "n": len(open_form),
                     "token_f1": f1_rows,
+                    "judge": judge_rows,
+                    "judge_name": judge_label,
                     "responses": responses_by_name,
                     "references": [r["output"] for r in open_form],
                 }
             )
         )
-        print(f"\nper-row token F1 and responses -> {out}")
+        print(f"\nper-row token F1, judge scores and responses -> {out}")
     if args.paired_vs:
         if args.paired_vs not in f1_rows:
             raise SystemExit(f"--paired-vs {args.paired_vs!r} is not a scored checkpoint")
         n_boot = 10_000
-        print(
-            f"\nPaired bootstrap on per-row token F1 vs {args.paired_vs} "
-            f"(n={len(open_form)} rows, {n_boot} resamples, seed 0, Holm over "
-            f"{len(f1_rows) - 1} models):"
-        )
-        print(
-            f"| Model | F1 (n={len(open_form)}) | F1 (first {DEFAULT_EVAL_N}) | diff vs "
-            f"{args.paired_vs} | 95% CI | p | p (Holm) | verdict |"
-        )
-        print("|---|---|---|---|---|---|---|---|")
-        for row in paired_f1_table(f1_rows, args.paired_vs, n_boot=n_boot):
+        metrics: list[tuple[str, dict[str, list[float]]]] = [("token F1", f1_rows)]
+        if args.judge == "ollama":
+            metrics.append((judge_label, {k: [float(s) for s in v] for k, v in judge_rows.items()}))
+        for metric, rows in metrics:
             print(
-                f"| {row['model']} | {row['f1']:.3f} | {row['f1_first']:.3f} | "
-                f"{row['diff']:+.4f} | [{row['ci_lo']:+.4f}, {row['ci_hi']:+.4f}] | "
-                f"{row['p']:.4f} | {row['p_holm']:.4f} | {row['verdict']} |"
+                f"\nPaired bootstrap on per-row {metric} vs {args.paired_vs} "
+                f"(n={len(open_form)} rows, {n_boot} resamples, seed 0, Holm over "
+                f"{len(rows) - 1} models):"
             )
+            print(
+                f"| Model | mean (n={len(open_form)}) | mean (first {DEFAULT_EVAL_N}) | diff vs "
+                f"{args.paired_vs} | 95% CI | p | p (Holm) | verdict |"
+            )
+            print("|---|---|---|---|---|---|---|---|")
+            for row in paired_f1_table(rows, args.paired_vs, n_boot=n_boot):
+                print(
+                    f"| {row['model']} | {row['f1']:.3f} | {row['f1_first']:.3f} | "
+                    f"{row['diff']:+.4f} | [{row['ci_lo']:+.4f}, {row['ci_hi']:+.4f}] | "
+                    f"{row['p']:.4f} | {row['p_holm']:.4f} | {row['verdict']} |"
+                )
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -582,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_dpo)
 
-    s = sub.add_parser("eval", help="perplexity + EM + token F1 + mock judge, weighted")
+    s = sub.add_parser("eval", help="perplexity + EM + token F1 + judge (mock or Ollama), weighted")
     s.add_argument(
         "--n",
         type=int,
@@ -595,9 +609,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--w-judge",
         type=float,
-        default=0.0,
-        help="MockJudge is ROUGE-L rescaled, so it duplicates token F1; off by default",
+        default=None,
+        help="default 0 for the mock judge (ROUGE-L duplicates token F1), 1 for --judge ollama",
     )
+    s.add_argument("--judge", choices=["mock", "ollama"], default="mock")
+    s.add_argument("--judge-url", default="http://localhost:11434", help="Ollama server")
+    s.add_argument("--judge-model", default="qwen3.6:27b-ctx4k")
     s.add_argument(
         "--checkpoints",
         default=None,

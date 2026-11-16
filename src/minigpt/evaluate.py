@@ -1,9 +1,11 @@
-"""Evaluation: perplexity, classification metrics, Judge protocol, ROUGE-L judge."""
+"""Evaluation: perplexity, classification metrics, Judge protocol, ROUGE-L and Ollama judges."""
 
 from __future__ import annotations
 
+import json
 import math
 import re
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass
 from typing import Protocol
@@ -180,6 +182,64 @@ class MockJudge:
             return 1
         f1 = RougeLJudge().judge(instruction, response, reference)["rouge_l_f1"]
         return 1 + min(4, int(f1 * 5))
+
+
+JUDGE_RUBRIC = """Grade the RESPONSE to the INSTRUCTION against the REFERENCE answer.
+
+5 = correct and complete; says the same as the reference
+4 = correct, minor omissions or extra detail
+3 = partly correct or relevant, but incomplete
+2 = on topic but mostly wrong
+1 = wrong, off topic, repetitive or gibberish
+
+Judge content, not wording or style. Reply with JSON only: {"score": <1-5>}."""
+
+_SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "integer", "minimum": 1, "maximum": 5}},
+    "required": ["score"],
+}
+
+
+class OllamaJudge:
+    """Reference-guided 1-5 judge on an Ollama server (native `/api/chat`).
+
+    Deterministic as far as Ollama allows: temperature 0, fixed seed, thinking off, and a JSON
+    schema constraining the reply. An empty response scores 1 without a call. Any reply that is
+    not a score in 1..5 raises instead of being guessed.
+    """
+
+    def __init__(
+        self, base_url: str, model: str, seed: int = 0, num_ctx: int = 4096, timeout: float = 300
+    ) -> None:
+        self.url = base_url.rstrip("/") + "/api/chat"
+        self.model, self.seed, self.num_ctx, self.timeout = model, seed, num_ctx, timeout
+
+    def score(self, instruction: str, response: str, reference: str) -> int:
+        """Return 1 (unusable) to 5 (matches the reference)."""
+        if not response.strip():
+            return 1
+        prompt = (
+            f"{JUDGE_RUBRIC}\n\nINSTRUCTION:\n{instruction}\n\n"
+            f"REFERENCE:\n{reference}\n\nRESPONSE:\n{response}"
+        )
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "think": False,
+            "format": _SCORE_SCHEMA,
+            "options": {"temperature": 0, "seed": self.seed, "num_ctx": self.num_ctx},
+        }
+        req = urllib.request.Request(
+            self.url, json.dumps(body).encode(), {"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            content = json.loads(resp.read())["message"]["content"]
+        score = json.loads(content).get("score")
+        if not isinstance(score, int) or not 1 <= score <= 5:
+            raise ValueError(f"judge reply is not a 1-5 score: {content!r}")
+        return score
 
 
 @dataclass(frozen=True)
