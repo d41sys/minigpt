@@ -25,26 +25,9 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    T[text] --> BPE[byte-level BPE] --> E[tok emb + pos emb]
-    E --> B1[block 1] --> BN[... block N] --> LN[final LayerNorm] --> H[LM head<br/>tied to tok emb]
-    subgraph block[pre-LN block]
-        direction TB
-        a[LN] --> att[causal MHA] --> r1((+)) --> b[LN] --> mlp[GELU MLP] --> r2((+))
-    end
-    H --> P[next-token logits]
-    LN -. last non-pad token .-> C[2-class head: spam]
-```
+![minigpt model architecture: BPE, embeddings, N pre-LN blocks, final LayerNorm, tied LM head; spam head on the last non-pad token](docs/diagrams/minigpt-model.svg)
 
-```mermaid
-flowchart LR
-    TS[tiny-Shakespeare] --> PT[pretrain] --> CK[(runs/pretrain/ckpt.pt)]
-    CK --> CLS[finetune-cls<br/>SMS Spam]
-    CK --> SFT[sft<br/>Alpaca 900] --> SCK[(runs/sft/ckpt.pt)]
-    SCK --> GEN[sample 300 rejected answers] --> DPO[dpo vs frozen SFT ref]
-    SCK & DPO --> EV[eval: ppl + EM + token F1 + judge, weighted]
-```
+![minigpt training pipeline: pretrain, spam classifier, SFT, DPO on 300 sampled rejected answers, eval of SFT and DPO](docs/diagrams/minigpt-pipeline.svg)
 
 ## Data and licences
 
