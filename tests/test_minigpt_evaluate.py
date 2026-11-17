@@ -16,6 +16,7 @@ from minigpt.evaluate import (
     normalize_answer,
     paired_bootstrap_test,
     token_f1,
+    wilson_interval,
 )
 
 
@@ -140,3 +141,10 @@ def test_paired_bootstrap_test_separates_shift_from_noise() -> None:
     centred -= centred.mean()
     _, lo, hi, p = paired_bootstrap_test(centred)
     assert lo < 0 < hi and p > 0.5
+
+
+def test_wilson_interval_hand_computed() -> None:
+    # 0/12 has upper bound z^2/n / (1 + z^2/n) = 0.2425 (the README's EM bound)
+    assert wilson_interval(0, 12) == pytest.approx((0.0, 0.24249), abs=1e-4)
+    lo, hi = wilson_interval(50, 100)
+    assert lo == pytest.approx(1 - hi) and lo == pytest.approx(0.4038, abs=1e-4)
