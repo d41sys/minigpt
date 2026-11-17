@@ -1,0 +1,6 @@
+loaded 300 fixed preference pairs from runs/dpo/pairs.json
+device=cuda preference_pairs=300 beta=0.1 nll_alpha=0.0
+step 1 dpo_loss 0.6931 (log 2 = 0.6931)
+epoch 1 mean dpo_loss 0.4880 reward_accuracy 0.897 logp/token chosen -3.073 (-0.012 vs ref) rejected -3.043 (-0.182 vs ref)
+epoch 2 mean dpo_loss 0.2412 reward_accuracy 0.940 logp/token chosen -3.115 (-0.054 vs ref) rejected -3.554 (-0.694 vs ref)
+checkpoint -> runs/dpo_a0/ckpt.pt

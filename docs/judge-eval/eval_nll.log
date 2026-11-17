@@ -1,0 +1,22 @@
+device=cuda em_rows=12 open_rows=100 weights=(1.0, 1.0, 1.0, 1.0)
+95% CIs: EM Wilson over rows; token F1 and judge: 10,000-resample row bootstrap
+
+| Model | Alpaca ppl (held-out responses) | Shakespeare ppl | EM [95% CI] | Token F1 [95% CI] | Judge (qwen3.6:27b-ctx4k, 1-5) [95% CI] | Aggregate |
+|---|---|---|---|---|---|---|
+| sft | 39.92 | 93.41 | 0.000 [0.000, 0.242] | 0.046 [0.036, 0.057] | 1.00 [1.00, 1.00] | 0.129 |
+| dpo_b0.1 | 41.61 | 90.16 | 0.000 [0.000, 0.242] | 0.057 [0.046, 0.068] | 1.00 [1.00, 1.00] | 0.130 |
+| dpo_nll0.2 | 39.69 | 90.15 | 0.000 [0.000, 0.242] | 0.057 [0.045, 0.069] | 1.00 [1.00, 1.00] | 0.131 |
+
+per-row token F1, judge scores and responses -> runs/eval/rows_nll.json
+
+Paired bootstrap on per-row token F1 vs sft (n=100 rows, 10000 resamples, seed 0, Holm over 2 models):
+| Model | mean (n=100) | mean (first 50) | diff vs sft | 95% CI | p | p (Holm) | verdict |
+|---|---|---|---|---|---|---|---|
+| dpo_b0.1 | 0.057 | 0.053 | +0.0103 | [-0.0035, +0.0246] | 0.1448 | 0.1448 | no detectable difference |
+| dpo_nll0.2 | 0.057 | 0.050 | +0.0106 | [+0.0007, +0.0205] | 0.0368 | 0.0736 | no detectable difference |
+
+Paired bootstrap on per-row Judge (qwen3.6:27b-ctx4k, 1-5) vs sft (n=100 rows, 10000 resamples, seed 0, Holm over 2 models):
+| Model | mean (n=100) | mean (first 50) | diff vs sft | 95% CI | p | p (Holm) | verdict |
+|---|---|---|---|---|---|---|---|
+| dpo_b0.1 | 1.000 | 1.000 | +0.0000 | [+0.0000, +0.0000] | 1.0000 | 1.0000 | no detectable difference |
+| dpo_nll0.2 | 1.000 | 1.000 | +0.0000 | [+0.0000, +0.0000] | 1.0000 | 1.0000 | no detectable difference |

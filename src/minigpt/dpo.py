@@ -205,8 +205,15 @@ def train_dpo(
     batch_size: int = 2,
     lr: float = 1e-5,
     device: torch.device | None = None,
+    nll_alpha: float = 0.0,
 ) -> dict[str, Any]:
-    """Train policy model using DPO against frozen reference model."""
+    """Train policy model using DPO against frozen reference model.
+
+    `nll_alpha` > 0 adds `nll_alpha` times the length-normalised NLL of the chosen responses
+    (Llama 3, section 4.1.4 uses 0.2), which keeps DPO from lowering the chosen likelihood.
+    Each epoch logs the policy's per-token log-prob of chosen and rejected responses and its
+    change against the reference: a negative chosen change is that failure mode.
+    """
     if device is None:
         device = get_device()
 
@@ -233,6 +240,7 @@ def train_dpo(
         correct = 0
         seen = 0
         steps = 0
+        sums = dict.fromkeys(("chosen", "rejected", "chosen_vs_ref", "rejected_vs_ref"), 0.0)
         for batch in loader:
             chosen_x = batch["chosen_input_ids"].to(device)
             chosen_y = batch["chosen_labels"].to(device)
@@ -255,9 +263,14 @@ def train_dpo(
                 ref_rejected_logps,
                 beta=beta,
             )
+            n_chosen = (chosen_y != -100).sum(-1).clamp(min=1)
+            n_rejected = (rejected_y != -100).sum(-1).clamp(min=1)
+            objective = loss
+            if nll_alpha > 0:
+                objective = loss + nll_alpha * -(policy_chosen_logps / n_chosen).mean()
 
             optimizer.zero_grad()
-            loss.backward()  # type: ignore[no-untyped-call]
+            objective.backward()  # type: ignore[no-untyped-call]
             torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
             optimizer.step()
 
@@ -267,12 +280,19 @@ def train_dpo(
             correct += int((chosen_rewards > rejected_rewards).sum())
             seen += chosen_rewards.numel()
             steps += 1
+            with torch.no_grad():  # per-token log-probs, summed over sequences
+                pc, pr = policy_chosen_logps / n_chosen, policy_rejected_logps / n_rejected
+                sums["chosen"] += pc.sum().item()
+                sums["rejected"] += pr.sum().item()
+                sums["chosen_vs_ref"] += (pc - ref_chosen_logps / n_chosen).sum().item()
+                sums["rejected_vs_ref"] += (pr - ref_rejected_logps / n_rejected).sum().item()
 
         history.append(
             {
                 "epoch": float(epoch + 1),
                 "dpo_loss": total_loss / max(1, steps),
                 "reward_accuracy": correct / max(1, seen),
+                **{f"logp_{k}": v / max(1, seen) for k, v in sums.items()},
             }
         )
 

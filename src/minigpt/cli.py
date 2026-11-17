@@ -352,13 +352,24 @@ def cmd_dpo(args: argparse.Namespace) -> None:
         pairs_file.write_text(json.dumps([vars(p) for p in pairs]))
         print(f"saved {len(pairs)} preference pairs -> {pairs_file}")
     ds = PreferenceDataset(pairs, tok, max_length=policy.config.context_length)
-    print(f"device={device} preference_pairs={len(ds)} beta={args.beta}")
-    res = train_dpo(policy, ref, ds, beta=args.beta, epochs=args.epochs, lr=args.lr, device=device)
+    print(f"device={device} preference_pairs={len(ds)} beta={args.beta} nll_alpha={args.nll_alpha}")
+    res = train_dpo(
+        policy,
+        ref,
+        ds,
+        beta=args.beta,
+        epochs=args.epochs,
+        lr=args.lr,
+        device=device,
+        nll_alpha=args.nll_alpha,
+    )
     print(f"step 1 dpo_loss {res['first_loss']:.4f} (log 2 = 0.6931)")
     for row in res["history"]:
         print(
             f"epoch {int(row['epoch'])} mean dpo_loss {row['dpo_loss']:.4f} "
-            f"reward_accuracy {row['reward_accuracy']:.3f}"
+            f"reward_accuracy {row['reward_accuracy']:.3f} "
+            f"logp/token chosen {row['logp_chosen']:.3f} ({row['logp_chosen_vs_ref']:+.3f} vs ref) "
+            f"rejected {row['logp_rejected']:.3f} ({row['logp_rejected_vs_ref']:+.3f} vs ref)"
         )
     out = Path(args.out)
     save_checkpoint(out, policy, None, step=args.epochs, val_loss=res["final_loss"])
@@ -600,6 +611,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lr", type=float, default=1e-5)
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--out", default=str(DPO_CKPT))
+    s.add_argument(
+        "--nll-alpha",
+        type=float,
+        default=0.0,
+        help="weight of the length-normalised NLL on chosen responses (Llama 3 uses 0.2)",
+    )
     s.add_argument(
         "--pairs-file",
         default="runs/dpo/pairs.json",

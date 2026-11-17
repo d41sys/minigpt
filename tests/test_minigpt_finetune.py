@@ -4,7 +4,13 @@ import pytest
 import torch
 
 from minigpt.bpe import BPETokenizer
-from minigpt.dpo import compute_sequence_log_probs, dpo_loss
+from minigpt.dpo import (
+    PreferenceDataset,
+    PreferenceSample,
+    compute_sequence_log_probs,
+    dpo_loss,
+    train_dpo,
+)
 from minigpt.evaluate import RougeLJudge, longest_common_subsequence
 from minigpt.finetune_cls import GPTForClassification, freeze_for_finetuning, split_data
 from minigpt.model import GPTConfig, GPTModel
@@ -43,6 +49,26 @@ def test_sft_masks_prompt_tokens() -> None:
     assert torch.all(y[: prompt_len - 1] == -100)
     response_targets = y[prompt_len - 1 :].tolist()
     assert response_targets == [*tok.encode("hello"), tok.eos_token_id]
+
+
+def test_dpo_nll_term_keeps_chosen_likelihood_higher() -> None:
+    tok = BPETokenizer()
+    tok.train("Below is an instruction. Write a response. good answer bad reply", 280)
+    pairs = [PreferenceSample("Say it", "good answer", "bad reply")] * 4
+    cfg = GPTConfig(vocab_size=300, context_length=512, d_model=32, num_layers=2, num_heads=4)
+    ds = PreferenceDataset(pairs, tok, max_length=cfg.context_length)
+    assert (ds[0]["chosen_labels"] != -100).any()  # the response survives truncation
+    cpu = torch.device("cpu")
+    shift = {}
+    for alpha in (0.0, 1.0):
+        torch.manual_seed(0)
+        ref = GPTModel(cfg)
+        policy = GPTModel(cfg)
+        policy.load_state_dict(ref.state_dict())
+        res = train_dpo(policy, ref, ds, beta=0.1, epochs=5, lr=1e-3, device=cpu, nll_alpha=alpha)
+        shift[alpha] = res["history"][-1]["logp_chosen_vs_ref"]
+    assert shift[1.0] > shift[0.0]
+    assert shift[1.0] > 0  # chosen tokens became more likely than under the reference
 
 
 def test_classifier_head_swap_and_freeze() -> None:
