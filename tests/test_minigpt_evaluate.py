@@ -78,6 +78,25 @@ def test_ollama_judge_rejects_bad_reply_and_skips_empty(monkeypatch: pytest.Monk
     assert len(sent) == 1  # the empty response made no call
 
 
+def test_ollama_judge_retries_server_errors_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    codes = [500, 500, None]  # two transient failures, then a reply
+    http_error = evaluate.urllib.error.HTTPError
+
+    def urlopen(req: Any, timeout: float) -> io.BytesIO:
+        code = codes.pop(0)
+        if code is not None:
+            raise http_error(req.full_url, code, "err", None, None)  # type: ignore[arg-type]
+        return io.BytesIO(json.dumps({"message": {"content": '{"score": 3}'}}).encode())
+
+    monkeypatch.setattr(evaluate.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(evaluate.time, "sleep", lambda s: None)
+    assert OllamaJudge("http://h:1", "qwen").score("q", "a", "b") == 3
+    codes[:] = [404]
+    with pytest.raises(evaluate.urllib.error.HTTPError):
+        OllamaJudge("http://h:1", "qwen").score("q", "a", "b")
+    assert codes == []  # 404 was not retried
+
+
 def _report(**kw: float) -> EvalReport:
     base = dict(
         perplexity=32.0,

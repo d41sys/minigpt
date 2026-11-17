@@ -125,13 +125,15 @@ Reading, as measured:
 
 Run: the whole pipeline above retrained on one RTX 4090 (`device=cuda`, torch 2.13 cu129), then scored on all 100 held-out rows with `qwen3.6:27b-ctx4k` (Ollama model ID `7d4e56429f65`, Q4). Script, environment, per-row scores and every response: [`docs/judge-eval/`](docs/judge-eval/).
 
-| Model | Alpaca ppl | Shakespeare ppl | EM (n=12) | Token F1 (n=100) | Qwen judge (n=100) | Aggregate (4 parts) |
+| Model | Alpaca ppl | Shakespeare ppl | EM (n=12) [95% CI] | Token F1 (n=100) [95% CI] | Qwen judge (n=100) [95% CI] | Aggregate (4 parts) |
 |---|---|---|---|---|---|---|
-| pretrain | 404.97 | 40.00 | 0.000 | 0.042 | 1.00 | 0.044 |
-| sft | 39.92 | 93.41 | 0.000 | 0.046 | 1.00 | 0.129 |
-| dpo β=0.05 | 42.51 | 90.51 | 0.000 | 0.062 | 1.00 | 0.130 |
-| dpo β=0.1 | 41.61 | 90.16 | 0.000 | 0.057 | 1.00 | 0.130 |
-| dpo β=0.5 | 39.50 | 91.04 | 0.000 | 0.061 | 1.00 | 0.133 |
+| pretrain | 404.97 | 40.00 | 0.000 [0.000, 0.242] | 0.042 [0.034, 0.050] | 1.00 [1.00, 1.00] | 0.044 |
+| sft | 39.92 | 93.41 | 0.000 [0.000, 0.242] | 0.046 [0.036, 0.057] | 1.00 [1.00, 1.00] | 0.129 |
+| dpo β=0.05 | 42.51 | 90.51 | 0.000 [0.000, 0.242] | 0.062 [0.050, 0.075] | 1.00 [1.00, 1.00] | 0.130 |
+| dpo β=0.1 | 41.61 | 90.16 | 0.000 [0.000, 0.242] | 0.057 [0.046, 0.068] | 1.00 [1.00, 1.00] | 0.130 |
+| dpo β=0.5 | 39.50 | 91.04 | 0.000 [0.000, 0.242] | 0.061 [0.050, 0.073] | 1.00 [1.00, 1.00] | 0.133 |
+
+CIs (printed by `eval` since this run): EM uses a Wilson interval over the 12 rows, token F1 and the judge a 10,000-resample row bootstrap of the mean. 0 of 12 exact matches is compatible with a true EM rate of up to 24%, so EM cannot separate these models at all. A second scoring run of the same checkpoints (with the CI code) reproduced every response and every judge score exactly ([`rows.json`](docs/judge-eval/rows.json)). The 300 DPO preference pairs of this run are in [`dpo_pairs.json`](docs/judge-eval/dpo_pairs.json).
 
 **The judge gives 1 to all 500 responses.** Two checks show this is a verdict, not a stuck judge ([`judge_check.json`](docs/judge-eval/judge_check.json)):
 
@@ -216,6 +218,8 @@ How to read these results:
 The earlier headline (val loss 3.648, perplexity 40.27) picked the best of 11 validation evaluations and reported that same minimum, so it is optimistically biased. The model also overfits: the train set is 414k tokens in non-overlapping windows (about 40 epochs in 2000 steps) and val loss turns up after step 800. The held-out 10% is now cut deterministically into contiguous **val** (first 23,000 tokens, selects the checkpoint) and **test** (last 23,001 tokens, reported only). Protocol, written before any run: [`docs/protocol-pretrain-regularization.md`](docs/protocol-pretrain-regularization.md). Raw per-run JSON and `summary.json`: `docs/pretrain-regularization/`. Reproduce with `minigpt pretrain --name pre_<variant>_s<seed> --seed <seed> [--sampling aligned] [--dropout 0.2] --results-out ...` and `minigpt pretrain-compare`.
 
 Headline, corrected: the val-selected baseline checkpoint has **test loss 3.875 (perplexity 48.2)**, mean over seeds 0, 1, 2 (range 3.872 to 3.879). The seed-0 rerun reproduces the checkpoint used downstream: same selected step (800) and the existing `runs/pretrain/ckpt.pt` scores the same on both halves under `minigpt pretrain-eval` (val 3.5264, test 3.8754). So 3.648 / 40.27 understated the loss by about 0.23 nats; the halves differ in difficulty (val 3.53 vs test 3.88), so part of that gap is the split and not only selection.
+
+Tokenizer-independent: `pretrain-eval` also prints **bits per byte** (loss in bits times tokens per byte of that half). The test half has 2.298 bytes/token, so test loss 3.875 is **2.433 bits/byte** (random-offset mean 3.767: 2.365). Measured directly on the CUDA retrain (test loss 3.844): 2.414. For scale, nanoGPT's character-level Shakespeare baseline reports val loss 1.4697 nats/char, about 2.12 bits/char; that model is larger and uses a different split, so this is an order-of-magnitude comparison, not a ranking.
 
 Three variants, seeds 0, 1, 2, same 2000-step budget, one factor changed at a time, selected on val, scored on test. `base`: aligned windows, dropout 0.1. `randoff`: random-offset windows (stride-1 windows, shuffled). `drop02`: aligned, dropout 0.2. Δ is test loss minus the same-seed baseline; the CI is a paired bootstrap over the 89 test windows (10,000 resamples), so it reflects test-set sampling noise only.
 

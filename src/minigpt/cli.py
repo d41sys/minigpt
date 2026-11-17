@@ -36,6 +36,7 @@ from minigpt.evaluate import (
     holm_adjust,
     paired_bootstrap_test,
     token_f1,
+    wilson_interval,
 )
 from minigpt.finetune_cls import (
     GPTForClassification,
@@ -243,14 +244,19 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
 
 
 def cmd_pretrain_eval(args: argparse.Namespace) -> None:
-    """Val-half and test-half loss of any pretraining checkpoint."""
+    """Val-half and test-half loss of any pretraining checkpoint, plus bits per byte."""
     device = get_device()
     tok = load_tokenizer()
     _, held_ids = shakespeare_splits(tok)
-    val_ids, test_ids = split_val_test(held_ids)
+    halves = dict(zip(("val", "test"), split_val_test(held_ids), strict=True))
     model = load_model(require(Path(args.checkpoint), "pretrain"))
-    losses = half_losses(model, {"val": val_ids, "test": test_ids}, args.batch_size, device)
+    losses = half_losses(model, halves, args.batch_size, device)
     print(f"{args.checkpoint}: {format_half_losses(losses)}")
+    # Tokenizer-independent: nats/token -> bits/byte via the half's own bytes-per-token ratio.
+    for name, ids in halves.items():
+        n_bytes = len(tok.decode(ids).encode("utf-8"))
+        bpb = float(np.mean(losses[name])) / np.log(2) * len(ids) / n_bytes
+        print(f"{name}: {n_bytes / len(ids):.3f} bytes/token, {bpb:.4f} bits/byte")
 
 
 def cmd_pretrain_compare(args: argparse.Namespace) -> None:
@@ -419,9 +425,10 @@ def cmd_eval(args: argparse.Namespace) -> None:
     responses_by_name: dict[str, list[str]] = {}
 
     print(f"device={device} em_rows={len(short)} open_rows={len(open_form)} weights={weights}")
+    print("95% CIs: EM Wilson over rows; token F1 and judge: 10,000-resample row bootstrap")
     print(
-        "\n| Model | Alpaca ppl (held-out responses) | Shakespeare ppl | EM | Token F1 "
-        f"| {judge_label} | Aggregate |"
+        "\n| Model | Alpaca ppl (held-out responses) | Shakespeare ppl | EM [95% CI] "
+        f"| Token F1 [95% CI] | {judge_label} [95% CI] | Aggregate |"
     )
     print("|---|---|---|---|---|---|---|")
     checkpoints = [("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)]
@@ -461,10 +468,14 @@ def cmd_eval(args: argparse.Namespace) -> None:
             open_n=len(open_form),
         )
         shakespeare_ppl = compute_perplexity(model, shakespeare, device)
+        em_lo, em_hi = wilson_interval(int(sum(em)), len(em))
+        _, f1_lo, f1_hi, _ = paired_bootstrap_test(np.asarray(f1))
+        _, j_lo, j_hi, _ = paired_bootstrap_test(np.asarray(scores, dtype=float))
         print(
             f"| {name} | {report.perplexity:.2f} | {shakespeare_ppl:.2f} | "
-            f"{report.exact_match:.3f} | "
-            f"{report.token_f1:.3f} | {report.judge_mean:.2f} | {report.aggregate(weights):.3f} |"
+            f"{report.exact_match:.3f} [{em_lo:.3f}, {em_hi:.3f}] | "
+            f"{report.token_f1:.3f} [{f1_lo:.3f}, {f1_hi:.3f}] | "
+            f"{report.judge_mean:.2f} [{j_lo:.2f}, {j_hi:.2f}] | {report.aggregate(weights):.3f} |"
         )
     if args.rows_out:
         out = Path(args.rows_out)

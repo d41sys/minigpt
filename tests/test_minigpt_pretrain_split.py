@@ -1,5 +1,8 @@
 import json
+import math
+import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -63,7 +66,8 @@ def test_pretrain_eval_reports_val_and_test_halves(
     import minigpt.cli as cli
 
     held = list(range(8 * 6 + 2))  # val half: 25 tokens -> 3 windows, test half: 25 -> 3 windows
-    monkeypatch.setattr(cli, "load_tokenizer", lambda: object())
+    two_bytes_per_token = SimpleNamespace(decode=lambda ids: "ab" * len(ids))
+    monkeypatch.setattr(cli, "load_tokenizer", lambda: two_bytes_per_token)
     monkeypatch.setattr(cli, "shakespeare_splits", lambda _tok: ([0], held))
     monkeypatch.setattr(cli, "get_device", lambda: torch.device("cpu"))
     torch.manual_seed(0)
@@ -74,6 +78,10 @@ def test_pretrain_eval_reports_val_and_test_halves(
     out = capsys.readouterr().out
     assert "val loss=" in out and "test loss=" in out
     assert out.count("(n=3 windows)") == 2
+    assert out.count("2.000 bytes/token") == 2
+    val_loss = float(re.findall(r"val loss=([\d.]+)", out)[0])
+    val_bpb = float(re.findall(r"val: .* ([\d.]+) bits/byte", out)[0])
+    assert val_bpb == pytest.approx(val_loss / math.log(2) / 2, abs=1e-3)
 
 
 def test_pretrain_writes_val_selected_test_results(

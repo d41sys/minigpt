@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
+import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
@@ -140,6 +142,15 @@ def token_f1(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def wilson_interval(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+    """Wilson score interval of a binomial proportion k / n."""
+    p = k / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return centre - half, centre + half
+
+
 def paired_bootstrap_test(
     diff: np.ndarray, n_boot: int = 10_000, seed: int = 0
 ) -> tuple[float, float, float, float]:
@@ -234,8 +245,15 @@ class OllamaJudge:
         req = urllib.request.Request(
             self.url, json.dumps(body).encode(), {"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            content = json.loads(resp.read())["message"]["content"]
+        for attempt in range(3):  # a shared server answers 500 while it (re)loads the model
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    content = json.loads(resp.read())["message"]["content"]
+                break
+            except urllib.error.HTTPError as err:
+                if err.code < 500 or attempt == 2:
+                    raise
+                time.sleep(5 * (attempt + 1))
         score = json.loads(content).get("score")
         if not isinstance(score, int) or not 1 <= score <= 5:
             raise ValueError(f"judge reply is not a 1-5 score: {content!r}")
