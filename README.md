@@ -133,7 +133,7 @@ Run: the whole pipeline above retrained on one RTX 4090 (`device=cuda`, torch 2.
 | dpo β=0.1 | 41.61 | 90.16 | 0.000 [0.000, 0.242] | 0.057 [0.046, 0.068] | 1.00 [1.00, 1.00] | 0.130 |
 | dpo β=0.5 | 39.50 | 91.04 | 0.000 [0.000, 0.242] | 0.061 [0.050, 0.073] | 1.00 [1.00, 1.00] | 0.133 |
 
-CIs (printed by `eval` since this run): EM uses a Wilson interval over the 12 rows, token F1 and the judge a 10,000-resample row bootstrap of the mean. 0 of 12 exact matches is compatible with a true EM rate of up to 24%, so EM cannot separate these models at all. A second scoring run of the same checkpoints (with the CI code) reproduced every response and every judge score exactly ([`rows.json`](docs/judge-eval/rows.json)). The 300 DPO preference pairs of this run are in [`dpo_pairs.json`](docs/judge-eval/dpo_pairs.json).
+CIs (printed by `eval` since this run): EM uses a Wilson interval over the 12 rows, token F1 and the judge a 10,000-resample row bootstrap of the mean. 0 of 12 exact matches is compatible with a true EM rate of up to 24%, so EM cannot separate these models at all. The judge's [1.00, 1.00] is a degenerate bootstrap (100 identical scores leave nothing to resample), not certainty; the informative bound is the share of responses scoring above 1: 0 of 100, Wilson 95% CI [0, 0.037] per checkpoint. A second scoring run of the same checkpoints (with the CI code) reproduced every response and every judge score exactly ([`rows.json`](docs/judge-eval/rows.json)). The 300 DPO preference pairs of this run are in [`dpo_pairs.json`](docs/judge-eval/dpo_pairs.json).
 
 **The judge gives 1 to all 500 responses.** Two checks show this is a verdict, not a stuck judge ([`judge_check.json`](docs/judge-eval/judge_check.json)):
 
