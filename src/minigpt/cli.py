@@ -2,7 +2,8 @@
 
 Pipeline: `pretrain` writes runs/pretrain/ckpt.pt; `finetune-cls` and `sft` start from it;
 `dpo` starts from runs/sft/ckpt.pt; `opd` distils runs/grpo/ckpt.pt into a smaller student;
-`eval` reports on whatever checkpoints exist.
+`reward-model` then `ppo` run RLHF from runs/reason_sft/ckpt.pt; `eval` reports on whatever
+checkpoints exist.
 `cai-data` / `cai-train` (sl, then rl) turn runs/sft into runs/cai_sl and runs/cai_rl.
 """
 
@@ -64,6 +65,16 @@ from minigpt.finetune_cls import (
 from minigpt.model import GPTConfig, GPTModel, count_parameters
 from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
+from minigpt.reason import make_task, reasoning_tokenizer
+from minigpt.rlhf import (
+    label_pairs,
+    load_reward_model,
+    new_reward_model,
+    overopt_summary,
+    save_reward_model,
+    train_ppo,
+    train_reward_model,
+)
 from minigpt.sft import (
     SFTDataset,
     download_alpaca_data,
@@ -95,6 +106,8 @@ OPD_OFF_POLICY_CKPT = Path("runs/opd/off_policy/ckpt.pt")
 CAI_DIR = Path("runs/cai")
 CAI_SL_CKPT = Path("runs/cai_sl/ckpt.pt")
 CAI_RL_CKPT = Path("runs/cai_rl/ckpt.pt")
+RM_CKPT = Path("runs/rm/ckpt.pt")
+PPO_CKPT = Path("runs/ppo/ckpt.pt")
 SFT_HELDOUT = 100  # last N Alpaca rows are never trained on
 CAI_HELDOUT = 20  # last N CAI prompts are never trained on
 
@@ -580,6 +593,97 @@ def add_cai_args(s: argparse.ArgumentParser) -> None:
     s.add_argument("--judge-model", default="qwen3.6:27b-ctx4k")
 
 
+def check_rollout_fits(model: GPTModel, max_digits: int, max_new_tokens: int) -> None:
+    longest = 2 * max_digits + 2 + max_new_tokens  # an "a+b=" prompt plus the completion
+    if longest > model.config.context_length:
+        sys.exit(
+            f"prompt + completion can reach {longest} tokens but the context is "
+            f"{model.config.context_length}: lower --max-digits or --max-new-tokens"
+        )
+
+
+def cmd_reward_model(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    sft = load_model(require(Path(args.sft), "reason-sft")).to(device)
+    check_rollout_fits(sft, args.max_digits, args.max_new_tokens)
+    rng = random.Random(args.seed)
+    tasks = [make_task(rng, rng.randint(1, args.max_digits)) for _ in range(args.tasks)]
+    print(f"device={device} sampling {args.k} completions for each of {args.tasks} tasks")
+    pairs = label_pairs(sft, tok, tasks, args.k, args.max_new_tokens, rng)
+    if len(pairs) < 10:
+        sys.exit(f"only {len(pairs)} strictly ordered pairs: the SFT policy is too uniform")
+    print(f"{len(pairs)} labeled pairs, the last 20% held out for RM eval")
+    rm = new_reward_model(sft, tok.special_to_id["<|pad|>"])
+    res = train_reward_model(
+        rm,
+        pairs,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        device=device,
+        seed=args.seed,
+    )
+    for row in res["history"]:
+        print(
+            f"epoch {int(row['epoch'])} bt_loss {row['loss']:.4f} (log 2 = 0.6931) "
+            f"train_acc {row['train_accuracy']:.3f} held-out loss {row['val_loss']:.4f} "
+            f"acc {row['val_accuracy']:.3f}"
+        )
+    out = Path(args.out)
+    save_reward_model(out, rm, args.epochs, res["val_loss"], res["val_accuracy"])
+    print(f"held-out pairwise accuracy {res['val_accuracy']:.3f} (chance 0.5)")
+    print(f"checkpoint -> {out}")
+
+
+def cmd_ppo(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    sft_path = require(Path(args.sft), "reason-sft")
+    policy, ref = load_model(sft_path), load_model(sft_path)
+    rm = load_reward_model(require(Path(args.rm), "reward-model"))
+    check_rollout_fits(policy, args.max_digits, args.max_new_tokens)
+    print(f"device={device} ppo steps={args.steps} beta={args.beta} lr={args.lr}")
+
+    def show(step: int, row: dict[str, float]) -> None:
+        if step == 1 or step % args.log_every == 0:
+            print(
+                f"step {step} reward {row['reward']:+.3f} gold_acc {row['gold_accuracy']:.3f} "
+                f"format {row['gold_format']:.3f} kl {row['kl']:.2f} "
+                f"value_loss {row['value_loss']:.3f} len {row['length']:.1f}"
+            )
+
+    res = train_ppo(
+        policy,
+        ref,
+        rm,
+        tok,
+        steps=args.steps,
+        tasks_per_step=args.tasks_per_step,
+        samples_per_task=args.samples_per_task,
+        max_digits=args.max_digits,
+        max_new_tokens=args.max_new_tokens,
+        beta=args.beta,
+        lr=args.lr,
+        ppo_epochs=args.ppo_epochs,
+        minibatch_size=args.minibatch_size,
+        seed=args.seed,
+        device=device,
+        on_step=show,
+    )
+    out = Path(args.out)
+    save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
+    (out.parent / "history.json").write_text(json.dumps(res["history"]))
+    s = overopt_summary(res["history"])
+    print(f"proxy reward {s['reward_first']:+.3f} -> {s['reward_last']:+.3f} (10-step means)")
+    print(f"gold accuracy peak {s['gold_peak']:.3f} at step {int(s['gold_peak_step'])}")
+    print(f"gold accuracy last {s['gold_last']:.3f}")
+    print("overoptimization (Gao et al. 2022): proxy still rising, gold below its peak")
+    print(f"checkpoint + history.json -> {out.parent}")
+
+
 SHORT_ANSWER_MAX_WORDS = 5  # held-out rows with references this short form the EM set
 DEFAULT_EVAL_N = 50  # default `eval --n`; the paired table also reports F1 on these first rows
 
@@ -923,6 +1027,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_cai_args(s)
     s.set_defaults(func=cmd_cai_eval)
+
+    s = sub.add_parser("reward-model", help="train a Bradley-Terry reward model (RLHF step 1)")
+    s.add_argument("--sft", default=str(REASON_SFT_CKPT), help="policy that writes the samples")
+    s.add_argument("--tasks", type=int, default=800, help="prompts to sample for")
+    s.add_argument("--k", type=int, default=4, help="completions per prompt; one pair per prompt")
+    s.add_argument("--max-digits", type=int, default=3, help="operands have 1..max-digits digits")
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--epochs", type=int, default=4)
+    s.add_argument("--batch-size", type=int, default=16)
+    s.add_argument("--lr", type=float, default=3e-5)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default=str(RM_CKPT))
+    s.set_defaults(func=cmd_reward_model)
+
+    s = sub.add_parser("ppo", help="PPO against the reward model (RLHF step 2)")
+    s.add_argument("--sft", default=str(REASON_SFT_CKPT), help="initial policy and KL reference")
+    s.add_argument("--rm", default=str(RM_CKPT))
+    s.add_argument("--steps", type=int, default=150)
+    s.add_argument("--tasks-per-step", type=int, default=8)
+    s.add_argument("--samples-per-task", type=int, default=8)
+    s.add_argument("--max-digits", type=int, default=3, help="operands have 1..max-digits digits")
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--beta", type=float, default=0.02, help="KL penalty to the SFT policy")
+    s.add_argument("--lr", type=float, default=2e-5)
+    s.add_argument("--ppo-epochs", type=int, default=2, help="passes over each rollout batch")
+    s.add_argument("--minibatch-size", type=int, default=16)
+    s.add_argument("--log-every", type=int, default=10)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default=str(PPO_CKPT))
+    s.set_defaults(func=cmd_ppo)
 
     s = sub.add_parser("eval", help="perplexity + EM + token F1 + judge (mock or Ollama), weighted")
     s.add_argument(
