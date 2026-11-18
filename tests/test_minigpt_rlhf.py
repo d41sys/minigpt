@@ -149,8 +149,7 @@ def test_strict_pair_skips_ties_and_picks_the_extremes() -> None:
 
 def test_overopt_summary_finds_the_gold_peak() -> None:
     history = [
-        {"reward": float(i), "gold_accuracy": g}
-        for i, g in enumerate([0.2, 0.4, 0.9, 0.3, 0.1])
+        {"reward": float(i), "gold_accuracy": g} for i, g in enumerate([0.2, 0.4, 0.9, 0.3, 0.1])
     ]
     s = overopt_summary(history, window=2)
     assert s["reward_first"] == pytest.approx(0.5)
