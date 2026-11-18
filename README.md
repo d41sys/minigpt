@@ -47,6 +47,7 @@ Run from the repo root. Downloads go to `data/raw/`, outputs to `runs/` (both gi
 ```bash
 uv run minigpt train-tokenizer                     # BPE, vocab 1024, on tiny-Shakespeare
 uv run minigpt pretrain --data tinyshakespeare --steps 2000   # random-offset windows; --sampling aligned = old recipe
+uv run minigpt pretrain --batch-size 16 --grad-accum 2 --bf16   # 2 micro-batches of 16 per step; bf16 autocast, no GradScaler
 uv run minigpt pretrain-eval                       # val-half and test-half loss of runs/pretrain/ckpt.pt
 uv run minigpt generate --prompt "ROMEO:"
 uv run minigpt data spam && uv run minigpt finetune-cls

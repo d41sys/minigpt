@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -75,22 +76,9 @@ def evaluate_loss(
     device: torch.device,
     max_batches: int = 20,
 ) -> float:
-    """Average cross-entropy per window over a dataloader (weights every window equally)."""
-    model.eval()
-    total_loss = 0.0
-    count = 0
-
-    for i, (x, y) in enumerate(data_loader):
-        if i >= max_batches:
-            break
-        x, y = x.to(device), y.to(device)
-        _, loss = model(x, targets=y)
-        if loss is not None:
-            total_loss += loss.item() * x.size(0)
-            count += x.size(0)
-
-    model.train()
-    return total_loss / max(1, count)
+    """Average cross-entropy per window over the first `max_batches` batches."""
+    losses = window_losses(model, data_loader, device, max_batches=max_batches)
+    return sum(losses) / max(1, len(losses))
 
 
 @torch.no_grad()
@@ -98,11 +86,14 @@ def window_losses(
     model: nn.Module,
     data_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
     device: torch.device,
+    max_batches: int | None = None,
 ) -> list[float]:
-    """Mean cross-entropy of every window in the loader (dropout off), in loader order."""
+    """Mean cross-entropy of each window (dropout off), in loader order; first batches only."""
     model.eval()
     out: list[float] = []
-    for x, y in data_loader:
+    for i, (x, y) in enumerate(data_loader):
+        if max_batches is not None and i >= max_batches:
+            break
         x, y = x.to(device), y.to(device)
         logits, _ = model(x)
         ce = F.cross_entropy(logits.transpose(1, 2), y, reduction="none")
@@ -174,8 +165,13 @@ def train(
     eval_batches: int = 20,
     checkpoint_dir: str | Path = "runs/minigpt",
     device: torch.device | None = None,
+    grad_accum_steps: int = 1,
+    bf16: bool = False,
 ) -> dict[str, Any]:
-    """Execute pretraining loop."""
+    """Execute pretraining loop.
+
+    `max_steps` counts optimizer steps; each one accumulates `grad_accum_steps` micro-batches.
+    """
     if device is None:
         device = get_device()
 
@@ -190,23 +186,15 @@ def train(
 
     history: list[dict[str, float]] = []
     best_val_loss = float("inf")
+    saved = False
 
     data_iter = iter(train_loader)
     initial_val_loss: float | None = None
 
     if val_loader is not None:
         initial_val_loss = evaluate_loss(model, val_loader, device=device, max_batches=eval_batches)
-        best_val_loss = initial_val_loss
 
     for step in range(max_steps):
-        try:
-            x, y = next(data_iter)
-        except StopIteration:
-            data_iter = iter(train_loader)
-            x, y = next(data_iter)
-
-        x, y = x.to(device), y.to(device)
-
         # Update learning rate
         lr_mult = get_lr_multiplier(step, warmup_steps=warmup_steps, total_steps=max_steps)
         current_lr = learning_rate * lr_mult
@@ -214,11 +202,29 @@ def train(
             param_group["lr"] = current_lr
 
         optimizer.zero_grad(set_to_none=True)
-        _, loss = model(x, targets=y)
-        if loss is None:
-            raise RuntimeError("Model forward did not return loss when targets were provided")
+        loss = torch.zeros((), device=device)
+        for _ in range(grad_accum_steps):
+            try:
+                x, y = next(data_iter)
+            except StopIteration:
+                data_iter = iter(train_loader)
+                x, y = next(data_iter)
+            x, y = x.to(device), y.to(device)
 
-        loss.backward()
+            # bf16 keeps fp32's exponent range, so unlike fp16 it needs no GradScaler.
+            amp: AbstractContextManager[Any] = (
+                torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+                if bf16
+                else nullcontext()
+            )
+            with amp:
+                _, micro_loss = model(x, targets=y)
+            if micro_loss is None:
+                raise RuntimeError("Model forward did not return loss when targets were provided")
+
+            micro_loss = micro_loss / grad_accum_steps
+            micro_loss.backward()
+            loss += micro_loss.detach()
 
         if grad_clip > 0.0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
@@ -239,9 +245,16 @@ def train(
             }
             history.append(step_record)
 
-            if val_loss < best_val_loss:
+            # Selecting on one noisy train batch is meaningless, so only val can pick "best".
+            if val_loader is not None and val_loss < best_val_loss:
                 best_val_loss = val_loss
                 save_checkpoint(best_ckpt_path, model, optimizer, step, val_loss)
+                saved = True
+
+    if not saved:  # no val_loader, or val never improved on inf (NaN): keep the final model
+        final_loss = history[-1]["val_loss"] if history else float("nan")
+        best_val_loss = final_loss
+        save_checkpoint(best_ckpt_path, model, optimizer, max_steps - 1, final_loss)
 
     return {
         "history": history,

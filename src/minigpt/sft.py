@@ -100,7 +100,8 @@ class SFTDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 tokenizer=tokenizer,
                 max_length=max_length,
             )
-            self.examples.append((x, y))
+            if (y != -100).any():  # a prompt filling max_length leaves no response to learn from
+                self.examples.append((x, y))
 
     def __len__(self) -> int:
         return len(self.examples)
