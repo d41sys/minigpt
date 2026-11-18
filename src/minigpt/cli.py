@@ -693,7 +693,8 @@ def cmd_ppo(args: argparse.Namespace) -> None:
     print(f"proxy reward {s['reward_first']:+.3f} -> {s['reward_last']:+.3f} (10-step means)")
     print(f"gold accuracy peak {s['gold_peak']:.3f} at step {int(s['gold_peak_step'])}")
     print(f"gold accuracy last {s['gold_last']:.3f}")
-    print("overoptimization (Gao et al. 2022): proxy still rising, gold below its peak")
+    if s["reward_last"] > s["reward_first"] and s["gold_last"] < s["gold_peak"]:
+        print("proxy rose while gold fell below its peak: the overoptimization pattern (Gao et al. 2022)")
     print(f"checkpoint + history.json -> {out.parent}")
 
 
