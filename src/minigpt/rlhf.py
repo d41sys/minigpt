@@ -183,7 +183,7 @@ def train_reward_model(
             chosen, rejected = score_pairs(rm, batch, device)
             loss = bradley_terry_loss(chosen, rejected)
             optimizer.zero_grad()
-            loss.backward()
+            loss.backward()  # type: ignore[no-untyped-call]
             torch.nn.utils.clip_grad_norm_(rm.parameters(), max_norm=1.0)
             optimizer.step()
             total += loss.item() * len(batch)
@@ -425,7 +425,7 @@ def train_ppo(
                 policy_loss = ppo_policy_loss(logps, old_logps[idx], advantages[idx], m, clip)
                 value_loss = ppo_value_loss(values, old_values[idx], returns[idx], m, vf_clip)
                 optimizer.zero_grad()
-                (policy_loss + vf_coef * value_loss).backward()
+                (policy_loss + vf_coef * value_loss).backward()  # type: ignore[no-untyped-call]
                 torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=1.0)
                 optimizer.step()
                 value_losses.append(value_loss.item())
