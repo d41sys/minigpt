@@ -34,6 +34,7 @@ from minigpt.evaluate import (
     compute_perplexity,
     exact_match,
     holm_adjust,
+    likelihood_ranking,
     paired_bootstrap_test,
     token_f1,
     wilson_interval,
@@ -111,9 +112,9 @@ def shakespeare_splits(tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
     return ids[:n], ids[n:]
 
 
-def load_alpaca(n: int = 1000) -> list[dict[str, str]]:
+def load_alpaca() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = json.loads(
-        download_alpaca_data(RAW_DIR / "alpaca_1k.json", sample_size=n).read_text("utf-8")
+        download_alpaca_data(RAW_DIR / "alpaca_1k.json").read_text("utf-8")
     )
     return rows
 
@@ -169,8 +170,6 @@ def format_half_losses(losses: dict[str, list[float]]) -> str:
 def cmd_pretrain(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
-    if args.data != "tinyshakespeare":
-        sys.exit("only --data tinyshakespeare is bundled")
     tok = load_tokenizer()
     train_ids, held_ids = shakespeare_splits(tok)
     val_ids, test_ids = split_val_test(held_ids)
@@ -301,12 +300,14 @@ def cmd_finetune_cls(args: argparse.Namespace) -> None:
 
 def sample_response(
     model: GPTModel, tok: BPETokenizer, row: dict[str, str], device: torch.device, n: int = 60
-) -> str:
-    ids = tok.encode(format_prompt(row["instruction"], row.get("input", "")), allow_special=True)
+) -> tuple[str, bool]:
+    """Greedy response and whether the model stopped (emitted EOS) within `n` new tokens."""
+    ids = tok.encode(format_prompt(row["instruction"], row.get("input", "")))
     x = torch.tensor([ids], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=n, temperature=0.0, eos_token_id=tok.eos_token_id)
-    new = [t for t in out[0, len(ids) :].tolist() if t != tok.eos_token_id]
-    return tok.decode(new).strip()
+    new = out[0, len(ids) :].tolist()
+    stopped = tok.eos_token_id in new
+    return tok.decode([t for t in new if t != tok.eos_token_id]).strip(), stopped
 
 
 def cmd_sft(args: argparse.Namespace) -> None:
@@ -331,7 +332,7 @@ def cmd_sft(args: argparse.Namespace) -> None:
     save_checkpoint(SFT_CKPT, model, None, step=args.epochs, val_loss=res["final_loss"])
     held = rows[-SFT_HELDOUT]
     print(f"checkpoint -> {SFT_CKPT}\n\n### Instruction: {held['instruction']}")
-    print(f"### Model: {sample_response(model, tok, held, device)}")
+    print(f"### Model: {sample_response(model, tok, held, device)[0]}")
     print(f"### Reference: {held['output'][:200]}")
 
 
@@ -442,6 +443,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
         f"| Token F1 [95% CI] | {judge_label} [95% CI] | Aggregate |"
     )
     print("|---|---|---|---|---|---|---|")
+    gen_rows = list({id(r): r for r in [*short, *open_form]}.values())  # generate each row once
+    rank_lines: list[str] = []
     checkpoints = [("pretrain", PRETRAIN_CKPT), ("sft", SFT_CKPT), ("dpo", DPO_CKPT)]
     if args.checkpoints:
         checkpoints = [
@@ -453,14 +456,17 @@ def cmd_eval(args: argparse.Namespace) -> None:
             print(f"| {name} | not run: {ckpt} missing | | | | | |")
             continue
         model = load_model(ckpt).to(device)
-        shakespeare = create_dataloader(val_ids, model.config.context_length, 16, shuffle=False)
+        shakespeare = create_dataloader(
+            val_ids, model.config.context_length, 16, shuffle=False, drop_last=False
+        )
         alpaca = DataLoader(
             SFTDataset(heldout, tok, max_length=model.config.context_length),
             batch_size=16,
             collate_fn=sft_collate_fn,
         )
-        em = [exact_match(sample_response(model, tok, r, device), r["output"]) for r in short]
-        responses = [sample_response(model, tok, r, device) for r in open_form]
+        gen = {id(r): sample_response(model, tok, r, device) for r in gen_rows}
+        em = [exact_match(gen[id(r)][0], r["output"]) for r in short]
+        responses = [gen[id(r)][0] for r in open_form]
         f1 = [token_f1(p, r["output"]) for p, r in zip(responses, open_form, strict=True)]
         f1_rows[name] = f1
         responses_by_name[name] = responses
@@ -469,14 +475,28 @@ def cmd_eval(args: argparse.Namespace) -> None:
             for p, r in zip(responses, open_form, strict=True)
         ]
         judge_rows[name] = scores
+        wins_sum, wins_tok = likelihood_ranking(
+            model, tok, heldout, device, model.config.context_length
+        )
         report = EvalReport(
             perplexity=compute_perplexity(model, alpaca, device),
             vocab_size=model.config.vocab_size,
             exact_match=sum(em) / max(1, len(em)),
-            exact_match_n=len(em),
             token_f1=sum(f1) / max(1, len(f1)),
             judge_mean=sum(scores) / max(1, len(scores)),
-            open_n=len(open_form),
+            rank_wins_sum=wins_sum,
+            rank_wins_per_token=wins_tok,
+            rank_n=len(heldout),
+            stopped=sum(stopped for _, stopped in gen.values()),
+            stopped_n=len(gen),
+        )
+        rank_cells = []
+        for wins in (report.rank_wins_sum, report.rank_wins_per_token):
+            lo, hi = wilson_interval(wins, report.rank_n)
+            rank_cells.append(f"{wins / report.rank_n:.3f} [{lo:.3f}, {hi:.3f}]")
+        rank_lines.append(
+            f"| {name} | {rank_cells[0]} | {rank_cells[1]} | "
+            f"{report.stopped}/{report.stopped_n} |"
         )
         shakespeare_ppl = compute_perplexity(model, shakespeare, device)
         em_lo, em_hi = wilson_interval(int(sum(em)), len(em))
@@ -488,6 +508,16 @@ def cmd_eval(args: argparse.Namespace) -> None:
             f"{report.token_f1:.3f} [{f1_lo:.3f}, {f1_hi:.3f}] | "
             f"{report.judge_mean:.2f} [{j_lo:.2f}, {j_hi:.2f}] | {report.aggregate(weights):.3f} |"
         )
+    if rank_lines:
+        print(
+            f"\nNot in the aggregate. Ranking: share of the {len(heldout)} held-out rows where the "
+            "reference beats row (i+37)'s answer for prompt i (chance 0.5; Wilson 95% CI). "
+            "Summed log-prob favours short answers; per-token divides by response length. "
+            "Stopped: greedy responses that emitted EOS within 60 tokens."
+        )
+        print("\n| Model | Ranking acc, summed | Ranking acc, per-token | Stopped |")
+        print("|---|---|---|---|")
+        print("\n".join(rank_lines))
     if args.rows_out:
         out = Path(args.rows_out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -556,7 +586,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_train_tokenizer)
 
     s = sub.add_parser("pretrain", help="pretrain a small GPT")
-    s.add_argument("--data", default="tinyshakespeare")
     s.add_argument("--name", default="pretrain")
     s.add_argument("--steps", type=int, default=2000)
     s.add_argument("--batch-size", type=int, default=32)

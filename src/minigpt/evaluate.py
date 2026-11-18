@@ -1,4 +1,4 @@
-"""Evaluation: perplexity, classification metrics, Judge protocol, ROUGE-L and Ollama judges."""
+"""Evaluation: perplexity, EM and token F1, likelihood ranking, Wilson and bootstrap CIs, judges."""
 
 from __future__ import annotations
 
@@ -17,7 +17,41 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from minigpt.bpe import BPETokenizer
+from minigpt.dpo import compute_sequence_log_probs
+from minigpt.sft import build_sft_example, sft_collate_fn
 from minigpt.train import get_device
+
+RANK_DISTRACTOR_OFFSET = 37  # distractor scheme of docs/judge-eval/judge_check.py
+
+
+@torch.no_grad()
+def likelihood_ranking(
+    model: nn.Module,
+    tokenizer: BPETokenizer,
+    rows: list[dict[str, str]],
+    device: torch.device,
+    max_length: int,
+) -> tuple[int, int]:
+    """Rows where the model prefers the reference over row (i+37)'s answer for prompt i.
+
+    Returns (wins by summed log-prob, wins by per-token log-prob). The sum favours the shorter
+    answer; dividing by response tokens (EOS included) removes that length bias. Ties lose.
+    """
+    model.eval()
+    wins_sum = wins_per_token = 0
+    for i, r in enumerate(rows):
+        answers = [r["output"], rows[(i + RANK_DISTRACTOR_OFFSET) % len(rows)]["output"]]
+        batch = [
+            build_sft_example(r["instruction"], a, tokenizer, r.get("input", ""), max_length)
+            for a in answers
+        ]
+        x, y = sft_collate_fn(batch)
+        logp = compute_sequence_log_probs(model, x.to(device), y.to(device)).cpu()
+        n_tok = (y != -100).sum(dim=1).clamp(min=1)
+        wins_sum += int(logp[0] > logp[1])
+        wins_per_token += int(logp[0] / n_tok[0] > logp[1] / n_tok[1])
+    return wins_sum, wins_per_token
 
 
 def compute_perplexity(
@@ -267,10 +301,14 @@ class EvalReport:
     perplexity: float
     vocab_size: int
     exact_match: float
-    exact_match_n: int
     token_f1: float
     judge_mean: float
-    open_n: int
+    # Reported next to the aggregate, never part of it. Counts of rows (see likelihood_ranking).
+    rank_wins_sum: int = 0
+    rank_wins_per_token: int = 0
+    rank_n: int = 0
+    stopped: int = 0
+    stopped_n: int = 0
 
     @property
     def perplexity_score(self) -> float:

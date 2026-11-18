@@ -1,13 +1,23 @@
 from pathlib import Path
 
+import pytest
+
 from minigpt.bpe import BPETokenizer
 
 
 def test_unicode_round_trip() -> None:
     tok = BPETokenizer()
     tok.train("hello world hello there, héllo wörld 你好 你好 😊 😊", target_vocab_size=300)
-    for text in ["héllo 你好世界 😊🚀 naïve café\n\tend", "unseen ✓ ∑ Ωmega", ""]:
+    texts = ["héllo 你好世界 😊🚀 naïve café\n\tend", "unseen ✓ ∑ Ωmega", "snake_case __init__", ""]
+    for text in texts:
         assert tok.decode(tok.encode(text)) == text
+
+
+def test_eos_token_id_requires_the_special() -> None:
+    tok = BPETokenizer()
+    tok.train("abc abc", target_vocab_size=262, specials=("<|pad|>",))
+    with pytest.raises(KeyError):
+        _ = tok.eos_token_id
 
 
 def test_merges_on_toy_corpus() -> None:

@@ -21,7 +21,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
-| Eval | `evaluate.py` | perplexity, exact match, token F1, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
+| Eval | `evaluate.py` | perplexity, exact match, token F1, likelihood ranking, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
 
 ## Architecture
 
@@ -31,7 +31,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 
 ## Data and licences
 
-Nothing is redistributed; every dataset is downloaded at run time from its source.
+Datasets are downloaded at run time from their sources. The only redistributed data are the Alpaca rows in `docs/judge-eval/` (`dpo_pairs.json`, `rows.json`, `rows_nll.json`), under CC BY-NC 4.0 with attribution to [tatsu-lab/stanford_alpaca](https://github.com/tatsu-lab/stanford_alpaca).
 
 | Data | Source | Licence |
 |---|---|---|
@@ -46,7 +46,7 @@ Run from the repo root. Downloads go to `data/raw/`, outputs to `runs/` (both gi
 
 ```bash
 uv run minigpt train-tokenizer                     # BPE, vocab 1024, on tiny-Shakespeare
-uv run minigpt pretrain --data tinyshakespeare --steps 2000   # random-offset windows; --sampling aligned = old recipe
+uv run minigpt pretrain --steps 2000              # random-offset windows; --sampling aligned = old recipe
 uv run minigpt pretrain --batch-size 16 --grad-accum 2 --bf16   # 2 micro-batches of 16 per step; bf16 autocast, no GradScaler
 uv run minigpt pretrain-eval                       # val-half and test-half loss of runs/pretrain/ckpt.pt
 uv run minigpt generate --prompt "ROMEO:"
@@ -57,7 +57,7 @@ uv run minigpt eval
 uv run minigpt eval --n 100 --paired-vs sft --checkpoints sft=runs/sft/ckpt.pt,dpo=runs/dpo/ckpt.pt
 ```
 
-Tests: `uv run pytest -q` (CI runs ruff, mypy and pytest on every push and PR). Release: push a tag `vX.Y.Z` matching `pyproject.toml`'s version; CI reruns, then the wheel and sdist are attached to a GitHub Release. The GPT-2 parity test
+Tests: `uv run pytest -q` (CI runs ruff, mypy and pytest on pushes to `main` and on every PR). Release: push a tag `vX.Y.Z` matching `pyproject.toml`'s version; CI reruns, then the wheel and sdist are attached to a GitHub Release. The GPT-2 parity test
 needs internet and the extras:
 `uv run --extra hf --extra test pytest -m network`.
 
@@ -67,6 +67,8 @@ All numbers come from one run on an Apple-silicon Mac (`device=mps`), seed 0, wi
 CLI defaults. The model is 6 layers, d=256, 8 heads, context 256, 5.07M params, BPE vocab 1024.
 
 All checkpoints were retrained from scratch after the repo split: pretrain, SFT and the spam classifier reproduce the earlier numbers exactly; DPO's epoch-2 loss and reward accuracy differ slightly (0.2427 / 0.940 vs 0.2314 / 0.95 before), cause not identified (same-seed reruns reproduce every metric and greedy response, but their weights differ by about 1e-5, so the cause may be run-to-run floating-point noise on MPS).
+
+Published tokenizer stats and every result below predate the fix that stopped the BPE pre-tokenizer from dropping `_` (`snake_case` used to decode as `snakecase`). Retraining the tokenizer changes its merges, so those numbers do not reproduce on current code until the server runs are redone. The eval's Shakespeare perplexity also used to skip the last partial batch and now includes it.
 
 | Experiment | Metric | Result |
 |---|---|---|
@@ -87,6 +89,8 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 - **Exact match** (SQuAD normalisation) on held-out Alpaca rows whose reference has ≤ 5 words (12 rows).
 - **Token F1** on the first 50 held-out Alpaca rows by default; `--n 100` scores all 100 held-out rows.
 - **Judge** (1–5) on the same rows. The default `MockJudge` maps ROUGE-L F1 onto the rubric so the eval runs offline; it duplicates token F1, so it is printed but **not aggregated**. `--judge ollama` swaps in a real LLM judge (`OllamaJudge`, see "Real LLM judge" below), which is aggregated by default.
+- **Likelihood ranking** (printed, **not aggregated**): for each of the 100 held-out rows, does the model give the row's own reference a higher log-probability than the reference of row `(i+37) % 100` (the distractor scheme of [`judge_check.py`](docs/judge-eval/judge_check.py)) as the continuation of prompt `i`? Reported as accuracy with a Wilson 95% CI (chance 0.5), twice: summed log-probability, which favours short answers, and per-token (length-normalised). The gap between the two is the length bias. Built on the SFT example builder and `dpo.compute_sequence_log_probs`.
+- **Stop rate** (printed, not aggregated): `stopped k/n`, how many of the greedy responses (at most 60 new tokens) ended with the end-of-text token instead of running to the limit.
 
 The aggregate is the unweighted mean of perplexity score, EM and token F1 (`--w-ppl --w-em --w-f1` default 1, `--w-judge` default 0). `minigpt eval --checkpoints pretrain=runs/pretrain/ckpt.pt,sft=...`. Add `--paired-vs sft` for a paired bootstrap CI of each other checkpoint's per-row token F1 minus SFT (95% percentile CI, 10,000 row resamples, bootstrap p Holm-adjusted across the compared checkpoints) and `--rows-out PATH` to save per-row F1 and responses:
 

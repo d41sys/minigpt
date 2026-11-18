@@ -57,8 +57,8 @@ def build_sft_example(
         (input_ids, targets): where targets for all prompt tokens are -100.
     """
     prompt = format_prompt(instruction, input_text)
-    prompt_ids = tokenizer.encode(prompt, allow_special=True)
-    response_ids = tokenizer.encode(response, allow_special=True)
+    prompt_ids = tokenizer.encode(prompt)
+    response_ids = tokenizer.encode(response)
 
     eos_id = tokenizer.eos_token_id
     full_ids = prompt_ids + response_ids + [eos_id]

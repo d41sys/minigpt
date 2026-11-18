@@ -21,9 +21,9 @@ BYTE_ALPHABET_SIZE = 256
 DEFAULT_SPECIALS: tuple[str, ...] = ("<|endoftext|>", "<|pad|>")
 
 # GPT-2 style pre-tokenization regex adapted for Python's standard `re` module
-# Captures contractions, letters, digits, other symbols, and whitespace runs.
+# Captures contractions, letters, digits, other symbols (incl. "_"), and whitespace runs.
 GPT2_SPLIT_PATTERN: re.Pattern[str] = re.compile(
-    r"""'(?:[sdmt]|ll|ve|re)| ?[^\W\d_]+| ?\d+| ?[^\s\w]+|\s+(?!\S)|\s+""",
+    r"""'(?:[sdmt]|ll|ve|re)| ?[^\W\d_]+| ?\d+| ?(?:[^\s\w]|_)+|\s+(?!\S)|\s+""",
     re.IGNORECASE,
 )
 
@@ -45,10 +45,8 @@ class BPETokenizer:
 
     @property
     def eos_token_id(self) -> int:
-        """Token ID for <|endoftext|> if present, otherwise default to 256 or 0."""
-        if "<|endoftext|>" in self.special_to_id:
-            return self.special_to_id["<|endoftext|>"]
-        return 0
+        """Token ID for <|endoftext|>; raises KeyError if the tokenizer has no such special."""
+        return self.special_to_id["<|endoftext|>"]
 
     def _add_token(self, token_bytes: bytes) -> int:
         if token_bytes in self.inv_vocab:
