@@ -9,6 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Per-layer key/value cache: {"k": (B, heads, T, head_dim), "v": same}; empty dict = nothing cached.
+LayerCache = dict[str, torch.Tensor]
+
 
 @dataclass
 class GPTConfig:
@@ -23,6 +26,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True
     use_sdpa: bool = False
+    pos_encoding: str = "learned"  # "learned" (GPT-2 wpe table) or "rope" (rotary, no wpe)
 
     def __post_init__(self) -> None:
         if self.d_ff is None:
@@ -31,6 +35,16 @@ class GPTConfig:
             raise ValueError(
                 f"d_model ({self.d_model}) must be divisible by num_heads ({self.num_heads})"
             )
+        if self.pos_encoding not in ("learned", "rope"):
+            raise ValueError(f"pos_encoding must be 'learned' or 'rope', got {self.pos_encoding!r}")
+        if self.pos_encoding == "rope" and (self.d_model // self.num_heads) % 2 != 0:
+            raise ValueError("rope needs an even head_dim")
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Rotate (B, heads, T, head_dim) by per-position angles (T, head_dim/2), half-split layout."""
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
 
 
 class CausalSelfAttention(nn.Module):
@@ -62,7 +76,15 @@ class CausalSelfAttention(nn.Module):
             persistent=False,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.rope = config.pos_encoding == "rope"
+        if self.rope:
+            # Angle table for absolute positions 0..context_length-1 (theta = 10000).
+            inv_freq = 10000.0 ** (-torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+            angles = torch.outer(torch.arange(config.context_length).float(), inv_freq)
+            self.register_buffer("rope_cos", angles.cos(), persistent=False)
+            self.register_buffer("rope_sin", angles.sin(), persistent=False)
+
+    def forward(self, x: torch.Tensor, cache: LayerCache | None = None) -> torch.Tensor:
         b, t, c = x.size()
 
         # Calculate Q, K, V
@@ -74,6 +96,22 @@ class CausalSelfAttention(nn.Module):
         k = k.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
 
+        # The new tokens sit at absolute positions start .. start+t-1.
+        start = cache["k"].size(2) if cache else 0
+        if self.rope:
+            rope_cos: torch.Tensor = self.rope_cos  # type: ignore[assignment]
+            rope_sin: torch.Tensor = self.rope_sin  # type: ignore[assignment]
+            cos, sin = rope_cos[start : start + t], rope_sin[start : start + t]
+            q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)  # k is cached rotated
+        if cache is not None:
+            if start:
+                k = torch.cat((cache["k"], k), dim=2)
+                v = torch.cat((cache["v"], v), dim=2)
+            cache["k"], cache["v"] = k, v
+        # Allowed keys for each new query: row i of the full mask, columns up to start+i.
+        full_mask: torch.Tensor = self.bias  # type: ignore[assignment]
+        mask = full_mask[:, :, start : start + t, : start + t]
+
         # MPS's fused kernel has no dropout support; use the explicit path there.
         mps_dropout = self.training and self.dropout_p > 0 and x.device.type == "mps"
         if self.use_sdpa and not mps_dropout:
@@ -82,16 +120,15 @@ class CausalSelfAttention(nn.Module):
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=None if start == 0 else mask,
                 dropout_p=self.dropout_p if self.training else 0.0,
-                is_causal=True,
+                is_causal=start == 0,
             )
         else:
             # Explicit manual causal attention
             scale = 1.0 / math.sqrt(self.head_dim)
             scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-            mask: torch.Tensor = self.bias  # type: ignore[assignment]
-            scores = scores.masked_fill(~mask[:, :, :t, :t], float("-inf"))
+            scores = scores.masked_fill(~mask, float("-inf"))
             weights = F.softmax(scores, dim=-1)
             weights = self.attn_dropout(weights)
             out = torch.matmul(weights, v)
@@ -126,13 +163,13 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.d_model, eps=1e-5, elementwise_affine=config.bias)
+        self.ln_1 = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.d_model, eps=1e-5, elementwise_affine=config.bias)
+        self.ln_2 = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
         self.mlp = FeedForward(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x: torch.Tensor, cache: LayerCache | None = None) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x), cache)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -145,11 +182,12 @@ class GPTModel(nn.Module):
         self.config = config
 
         self.wte = nn.Embedding(config.vocab_size, config.d_model)
-        self.wpe = nn.Embedding(config.context_length, config.d_model)
+        if config.pos_encoding == "learned":
+            self.wpe = nn.Embedding(config.context_length, config.d_model)
         self.drop = nn.Dropout(config.dropout)
 
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.num_layers)])
-        self.ln_f = nn.LayerNorm(config.d_model, eps=1e-5, elementwise_affine=config.bias)
+        self.ln_f = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
 
         # Output LM Head (without bias)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
@@ -177,31 +215,35 @@ class GPTModel(nn.Module):
         self,
         idx: torch.Tensor,
         targets: torch.Tensor | None = None,
+        cache: list[LayerCache] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass.
 
         Args:
             idx: Tensor of token IDs with shape (B, T)
             targets: Optional ground-truth token IDs with shape (B, T)
+            cache: Optional per-layer KV cache (see `generate`). `idx` then holds only the
+                new tokens, positioned right after the cached ones; the cache is extended in place.
 
         Returns:
             Tuple of (logits, loss). If targets is None, loss is None.
         """
         device = idx.device
         _b, t = idx.size()
-        if t > self.config.context_length:
+        start = cache[0]["k"].size(2) if cache and cache[0] else 0
+        if start + t > self.config.context_length:
             raise ValueError(
-                f"Cannot forward sequence of length {t}, block size is {self.config.context_length}"
+                f"Cannot forward sequence of length {start + t}, "
+                f"block size is {self.config.context_length}"
             )
 
-        pos = torch.arange(0, t, dtype=torch.long, device=device)
+        x = self.wte(idx)
+        if self.config.pos_encoding == "learned":
+            x = x + self.wpe(torch.arange(start, start + t, dtype=torch.long, device=device))
+        x = self.drop(x)
 
-        tok_emb = self.wte(idx)
-        pos_emb = self.wpe(pos)
-        x = self.drop(tok_emb + pos_emb)
-
-        for block in self.blocks:
-            x = block(x)
+        for i, block in enumerate(self.blocks):
+            x = block(x, cache[i] if cache is not None else None)
 
         x = self.ln_f(x)
         logits = self.lm_head(x)
@@ -224,17 +266,28 @@ class GPTModel(nn.Module):
         temperature: float = 1.0,
         top_k: int | None = None,
         eos_token_id: int | None = None,
+        use_cache: bool = True,
     ) -> torch.Tensor:
-        """Autoregressively generate next tokens given a conditioning prompt."""
+        """Autoregressively generate next tokens given a conditioning prompt.
+
+        With `use_cache` (default) each layer keeps the keys and values of every token seen so
+        far. The prompt is processed once; each later step feeds only the newest token and its
+        single query attends over the cached keys, so a step costs O(T) instead of the O(T^2)
+        of re-running the whole prefix. Once the sequence outgrows `context_length` the window
+        slides, every token's position changes, and the cache is stale: those steps crop to the
+        last `context_length` tokens and recompute, exactly like `use_cache=False`.
+        """
         self.eval()
+        cache: list[LayerCache] = [{} for _ in self.blocks]
         for _ in range(max_new_tokens):
-            # Crop to context length if sequence length exceeds capacity
-            idx_cond = (
-                idx
-                if idx.size(1) <= self.config.context_length
-                else idx[:, -self.config.context_length :]
-            )
-            logits, _ = self(idx_cond)
+            if idx.size(1) > self.config.context_length:
+                # Crop to context length if sequence length exceeds capacity
+                logits, _ = self(idx[:, -self.config.context_length :])
+            elif use_cache:
+                # Empty cache: whole prompt; otherwise just the newest token.
+                logits, _ = self(idx[:, -1:] if cache[0] else idx, cache=cache)
+            else:
+                logits, _ = self(idx)
             # Pick logits at the last position
             logits = logits[:, -1, :]
 
