@@ -232,7 +232,8 @@ class GPTModel(nn.Module):
         for i, block in enumerate(self.blocks):
             x = block(x, cache[i] if cache is not None else None)
 
-        return self.ln_f(x)
+        x = self.ln_f(x)
+        return x
 
     def forward(
         self,
