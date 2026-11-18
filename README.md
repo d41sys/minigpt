@@ -79,7 +79,7 @@ Published tokenizer stats and every result below predate the fix that stopped th
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 65 passed, 1 deselected (network) in 5 s on CI |
+| Unit tests | `pytest` | 79 passed, 1 deselected (network) in 6 s on CI |
 
 ### Evaluation pipeline
 
