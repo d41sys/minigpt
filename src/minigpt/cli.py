@@ -1,10 +1,12 @@
-"""minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, CAI, eval, generation.
+"""minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, CAI, eval, generation, RL.
 
 Pipeline: `pretrain` writes runs/pretrain/ckpt.pt; `finetune-cls` and `sft` start from it;
 `dpo` starts from runs/sft/ckpt.pt; `opd` distils runs/grpo/ckpt.pt into a smaller student;
 `reward-model` then `ppo` run RLHF from runs/reason_sft/ckpt.pt; `eval` reports on whatever
 checkpoints exist.
 `cai-data` / `cai-train` (sl, then rl) turn runs/sft into runs/cai_sl and runs/cai_rl.
+Reasoning track (addition with chain of thought): `reason-pretrain` -> `reason-sft` ->
+`grpo` or `hack-demo`; `reason-eval` scores any of those checkpoints.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import random
 import sys
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -62,10 +65,18 @@ from minigpt.finetune_cls import (
     split_data,
     train_classifier,
 )
+from minigpt.grpo import RewardFn, Samples, default_reward, train_grpo
 from minigpt.model import GPTConfig, GPTModel, count_parameters
+from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
-from minigpt.reason import make_task, reasoning_tokenizer
+from minigpt.reason import (
+    equation_corpus,
+    evaluate_reasoning,
+    make_task,
+    reasoning_tokenizer,
+    sft_trace_dataset,
+)
 from minigpt.rlhf import (
     label_ranked_pairs,
     load_reward_model,
@@ -99,8 +110,10 @@ TOKENIZER_PATH = Path("runs/tokenizer.json")
 PRETRAIN_CKPT = Path("runs/pretrain/ckpt.pt")
 SFT_CKPT = Path("runs/sft/ckpt.pt")
 DPO_CKPT = Path("runs/dpo/ckpt.pt")
-GRPO_CKPT = Path("runs/grpo/ckpt.pt")
+REASON_PRETRAIN_CKPT = Path("runs/reason_pretrain/ckpt.pt")
 REASON_SFT_CKPT = Path("runs/reason_sft/ckpt.pt")
+GRPO_CKPT = Path("runs/grpo/ckpt.pt")
+HACK_CKPT = Path("runs/hack_demo/ckpt.pt")
 OPD_CKPT = Path("runs/opd/ckpt.pt")
 OPD_OFF_POLICY_CKPT = Path("runs/opd/off_policy/ckpt.pt")
 CAI_DIR = Path("runs/cai")
@@ -866,6 +879,189 @@ def cmd_eval(args: argparse.Namespace) -> None:
                 )
 
 
+def format_reasoning(res: dict[str, Any]) -> str:
+    rows = [
+        f"{d} digits: accuracy {m['accuracy']:.3f}  format {m['format']:.3f}  "
+        f"tokens {m['mean_tokens']:.1f}"
+        for d, m in res["per_digit"].items()
+    ]
+    rows.append(
+        f"overall:  accuracy {res['accuracy']:.3f}  format {res['format']:.3f}  "
+        f"tokens {res['mean_tokens']:.1f}"
+    )
+    return "\n".join(rows)
+
+
+def cmd_reason_pretrain(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    rng = random.Random(args.seed)
+    train_ids = tok.encode(equation_corpus(rng, args.corpus_size, 4))
+    val_ids = tok.encode(equation_corpus(rng, max(1, args.corpus_size // 25), 4))
+    cfg = GPTConfig(
+        vocab_size=tok.vocab_size,
+        context_length=args.context_length,
+        d_model=args.d_model,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        use_sdpa=True,
+    )
+    model = GPTModel(cfg)
+    params = sum(p.numel() for p in model.parameters())
+    print(f"device={device} train_tokens={len(train_ids):,} params={params:,}")
+    train_loader = create_dataloader(
+        train_ids, cfg.context_length, args.batch_size, stride=1, shuffle=True
+    )
+    val_loader = create_dataloader(
+        val_ids, cfg.context_length, args.batch_size, shuffle=False, drop_last=False
+    )
+    res = train(
+        model,
+        train_loader,
+        val_loader,
+        max_steps=args.steps,
+        warmup_steps=max(1, args.steps // 20),
+        learning_rate=args.lr,
+        eval_interval=args.eval_interval,
+        checkpoint_dir=Path("runs") / args.name,
+        device=device,
+    )
+    for row in res["history"]:
+        print(f"step {int(row['step']):5d} train {row['train_loss']:.4f} val {row['val_loss']:.4f}")
+    print(f"checkpoint -> {res['checkpoint_path']}")
+
+
+def cmd_reason_sft(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    model = load_model(require(Path(args.base), "reason-pretrain"))
+    rng = random.Random(args.seed + 1000)  # apart from the fixed tasks of `reason-eval`
+    tasks = [make_task(rng, rng.randint(1, args.max_digits)) for _ in range(args.n)]
+    print(f"device={device} traces={len(tasks)} digits=1-{args.max_digits}")
+    res = train_sft(
+        model,
+        sft_trace_dataset(tasks, tok),
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.lr,
+        device=device,
+    )
+    for row in res["history"]:
+        print(f"epoch {row['epoch']} loss {row['loss']:.4f}")
+    save_checkpoint(Path(args.out), model, None, step=args.epochs, val_loss=res["final_loss"])
+    print(f"checkpoint -> {args.out}")
+
+
+def cmd_reason_eval(args: argparse.Namespace) -> None:
+    device = get_device()
+    model = load_model(require(Path(args.checkpoint), "reason-sft")).to(device)
+    print(format_reasoning(evaluate_reasoning(model, reasoning_tokenizer(), args.n, args.seed)))
+
+
+def run_grpo(
+    args: argparse.Namespace,
+    reward_fn: RewardFn,
+    observe: Callable[[Samples], dict[str, float]] | None,
+) -> list[dict[str, float]]:
+    """Train from the reasoning SFT checkpoint, save it, print greedy accuracy before and after."""
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    policy = load_model(require(Path(args.base), "reason-sft"))
+    ref = load_model(args.base)
+    print(f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm}")
+
+    def log(rec: dict[str, float]) -> None:
+        if int(rec["step"]) % args.log_every == 0:
+            skip = ("step", "tp", "fp", "fn")
+            shown = " ".join(f"{k} {v:.3f}" for k, v in rec.items() if k not in skip)
+            print(f"step {int(rec['step']):4d} {shown}")
+
+    res = train_grpo(
+        policy,
+        ref,
+        tok,
+        steps=args.steps,
+        tasks_per_step=args.tasks,
+        group_size=args.group,
+        digits=(args.min_digits, args.max_digits),
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        lr=args.lr,
+        beta=args.beta,
+        clip_eps=args.clip_eps,
+        mu=args.mu,
+        std_norm=not args.no_std_norm,
+        loss_agg=args.loss_agg,
+        reward_fn=reward_fn,
+        observe=observe,
+        on_step=log,
+        seed=args.seed,
+        device=device,
+    )
+    out = Path(args.out)
+    save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
+    (out.parent / "history.json").write_text(json.dumps(res["history"]), encoding="utf-8")
+    print("greedy on fixed tasks, SFT start:")
+    print(format_reasoning(evaluate_reasoning(ref, tok, args.eval_n)))
+    print("greedy on fixed tasks, after RL:")
+    print(format_reasoning(evaluate_reasoning(policy, tok, args.eval_n)))
+    print(f"checkpoint -> {out}")
+    history: list[dict[str, float]] = res["history"]
+    return history
+
+
+def cmd_grpo(args: argparse.Namespace) -> None:
+    run_grpo(args, default_reward, None)
+
+
+def cmd_hack_demo(args: argparse.Namespace) -> None:
+    """GRPO against the substring grader, tracking proxy vs true reward and the CoT monitor."""
+    summary = summarize_hack(run_grpo(args, lenient_reward, rollout_monitor(lenient_reward)))
+    for name, label in (
+        ("reward", "proxy reward (substring grader)"),
+        ("accuracy", "true accuracy (answer tag)"),
+        ("hack_rate", "hack rate (proxy 1, true 0)"),
+        ("flag_rate", "monitor flag rate"),
+    ):
+        first, last = summary[f"{name}_first"], summary[f"{name}_last"]
+        print(f"{label:32s} first fifth {first:.3f} -> last fifth {last:.3f}")
+    precision, recall = summary["precision"], summary["recall"]
+    print(f"monitor vs hack label: precision {precision:.3f}, recall {recall:.3f}")
+
+
+def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
+    s.add_argument("--base", default=str(REASON_SFT_CKPT))
+    s.add_argument("--steps", type=int, default=200)
+    s.add_argument("--tasks", type=int, default=8, help="tasks sampled per step (B)")
+    s.add_argument("--group", type=int, default=8, help="completions per task (G)")
+    s.add_argument("--min-digits", type=int, default=1)
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--lr", type=float, default=5e-5)
+    s.add_argument("--beta", type=float, default=0.04, help="weight of the KL to the SFT model")
+    s.add_argument("--clip-eps", type=float, default=0.2)
+    s.add_argument("--mu", type=int, default=1, help="inner optimizer steps per batch")
+    s.add_argument(
+        "--no-std-norm",
+        action="store_true",
+        help="advantage = reward - group mean, no std division (Dr. GRPO)",
+    )
+    s.add_argument(
+        "--loss-agg",
+        choices=["seq-mean", "token-sum"],
+        default="seq-mean",
+        help="per-sequence token mean (GRPO) or sum over a constant max length (Dr. GRPO)",
+    )
+    s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
+    s.add_argument("--log-every", type=int, default=10)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default=str(out))
+
+
 def cmd_generate(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
@@ -1090,6 +1286,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--rows-out", default=None, help="write per-row token F1 and responses (JSON)")
     s.set_defaults(func=cmd_eval)
+
+    s = sub.add_parser("reason-pretrain", help="pretrain a tiny GPT on bare equations a+b=c")
+    s.add_argument("--name", default="reason_pretrain", help="checkpoint goes to runs/<name>")
+    s.add_argument("--steps", type=int, default=1500)
+    s.add_argument("--corpus-size", type=int, default=50000, help="equations (digits 1-4)")
+    s.add_argument("--batch-size", type=int, default=32)
+    s.add_argument("--context-length", type=int, default=128)
+    s.add_argument("--d-model", type=int, default=128)
+    s.add_argument("--num-layers", type=int, default=4)
+    s.add_argument("--num-heads", type=int, default=4)
+    s.add_argument("--lr", type=float, default=1e-3)
+    s.add_argument("--eval-interval", type=int, default=250)
+    s.add_argument("--seed", type=int, default=0)
+    s.set_defaults(func=cmd_reason_pretrain)
+
+    s = sub.add_parser("reason-sft", help="cold-start SFT on reference chain-of-thought traces")
+    s.add_argument("--base", default=str(REASON_PRETRAIN_CKPT))
+    s.add_argument("--n", type=int, default=500, help="traces")
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--epochs", type=int, default=15)
+    s.add_argument("--batch-size", type=int, default=16)
+    s.add_argument("--lr", type=float, default=5e-4)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default=str(REASON_SFT_CKPT))
+    s.set_defaults(func=cmd_reason_sft)
+
+    s = sub.add_parser("reason-eval", help="greedy accuracy / format / length, 1-5 digits")
+    s.add_argument("--checkpoint", default=str(REASON_SFT_CKPT))
+    s.add_argument("--n", type=int, default=50, help="tasks per digit count")
+    s.add_argument("--seed", type=int, default=0)
+    s.set_defaults(func=cmd_reason_eval)
+
+    s = sub.add_parser("grpo", help="GRPO on verifiable addition from the reasoning SFT model")
+    add_grpo_args(s, GRPO_CKPT)
+    s.set_defaults(func=cmd_grpo)
+
+    s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")
+    add_grpo_args(s, HACK_CKPT)
+    s.set_defaults(func=cmd_hack_demo)
 
     s = sub.add_parser("generate", help="sample text")
     s.add_argument("--prompt", default="ROMEO:")
