@@ -1,4 +1,5 @@
-from pathlib import Path
+import sys
+from types import ModuleType
 
 import pytest
 import torch
@@ -21,35 +22,37 @@ def test_map_hf_key_to_minigpt() -> None:
     assert map_hf_key_to_minigpt("wte.weight") == ("wte.weight", False)
 
 
-def _write_hf_checkpoint(model: GPTModel, path: Path, drop: str | None = None) -> None:
-    """Save `model` in HF GPT-2 layout: `h.N.` keys, Conv1D weights stored transposed."""
-    from safetensors.torch import save_file
-
+def _hf_state(model: GPTModel, drop: str | None = None) -> dict[str, torch.Tensor]:
+    """`model` in HF GPT-2 layout: `h.N.` keys, Conv1D weights stored transposed."""
     tensors: dict[str, torch.Tensor] = {}
     for key, val in model.state_dict().items():
         if key == "lm_head.weight" or key == drop:
             continue
-        hf_key = key.replace("blocks.", "h.", 1)
         if key.endswith(CONV1D_WEIGHT_PATTERNS):
             val = val.t()
-        tensors[hf_key] = val.contiguous().clone()
-    save_file(tensors, str(path))
+        tensors[key.replace("blocks.", "h.", 1)] = val.clone()
+    return tensors
 
 
-def test_load_hf_gpt2_weights_roundtrip_and_missing_key(tmp_path: Path) -> None:
-    pytest.importorskip("safetensors")
+def _serve_state(monkeypatch: pytest.MonkeyPatch, tensors: dict[str, torch.Tensor]) -> None:
+    """Make `from safetensors.torch import load_file` return `tensors` (works without the extra)."""
+    mod = ModuleType("safetensors.torch")
+    mod.load_file = lambda _path: tensors
+    monkeypatch.setitem(sys.modules, "safetensors", ModuleType("safetensors"))
+    monkeypatch.setitem(sys.modules, "safetensors.torch", mod)
+
+
+def test_load_hf_gpt2_weights_roundtrip_and_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     torch.manual_seed(0)
     src = GPTModel(TINY)
-    good = tmp_path / "good.safetensors"
-    _write_hf_checkpoint(src, good)
-    dst = load_hf_gpt2_weights(GPTModel(TINY), safetensors_path=good)
+    _serve_state(monkeypatch, _hf_state(src))
+    dst = load_hf_gpt2_weights(GPTModel(TINY), safetensors_path="unused")
     for key, val in src.state_dict().items():
         assert torch.equal(dst.state_dict()[key], val), key
 
-    bad = tmp_path / "bad.safetensors"
-    _write_hf_checkpoint(src, bad, drop="blocks.1.mlp.c_fc.weight")
+    _serve_state(monkeypatch, _hf_state(src, drop="blocks.1.mlp.c_fc.weight"))
     with pytest.raises(ValueError, match="missing"):
-        load_hf_gpt2_weights(GPTModel(TINY), safetensors_path=bad)
+        load_hf_gpt2_weights(GPTModel(TINY), safetensors_path="unused")
 
 
 @pytest.mark.network
