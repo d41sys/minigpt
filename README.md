@@ -21,6 +21,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
+| Constitutional AI | `cai.py` | judge-LLM critique/revise (SL) and A/B preference labels (RL) under random constitution principles; Ollama judge behind an injectable `ChatJudge` protocol |
 | Eval | `evaluate.py` | perplexity, exact match, token F1, likelihood ranking, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
 
 ## Architecture
@@ -53,6 +54,8 @@ uv run minigpt generate --prompt "ROMEO:"
 uv run minigpt data spam && uv run minigpt finetune-cls
 uv run minigpt data alpaca && uv run minigpt sft
 uv run minigpt dpo
+uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl   # Constitutional AI (judge on :11434)
+uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl
 uv run minigpt eval
 uv run minigpt eval --n 100 --paired-vs sft --checkpoints sft=runs/sft/ckpt.pt,dpo=runs/dpo/ckpt.pt
 ```
@@ -79,7 +82,7 @@ Published tokenizer stats and every result below predate the fix that stopped th
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 79 passed, 1 deselected (network) in 6 s on CI |
+| Unit tests | `pytest` | 90 passed, 1 deselected (network) in 9 s on CI |
 
 ### Evaluation pipeline
 
@@ -244,6 +247,22 @@ Small-scale copies of post-training stages that labs describe publicly, run on v
 The student samples its own completions and, at every completion token, minimises the full-vocabulary KL between its next-token distribution and a frozen teacher's on that same prefix ([`opd.py`](src/minigpt/opd.py)). Mirrors the last stage of [DeepSeek-V4.1](https://arxiv.org/html/2609.19969) (§5.2.4, full-vocabulary OPD); background: [MiniLLM](https://arxiv.org/abs/2306.08543) (Gu et al. 2024) and [Thinking Machines, "On-policy distillation"](https://thinkingmachines.ai/blog/on-policy-distillation/) (2025).
 Run: `minigpt opd` (teacher `runs/grpo/ckpt.pt`, student `runs/reason_sft/ckpt.pt` or `--student-config 64,2,4`; writes `runs/opd/ckpt.pt`). `--kl forward` swaps the direction; `--off-policy` is the baseline where the teacher samples and the student does plain SFT on those samples (`runs/opd/off_policy/ckpt.pt`).
 Lessons to test: reverse KL is mode-seeking (the student commits to one teacher mode) and forward KL is mode-covering; training on the student's own prefixes is meant to fix exposure bias, since an off-policy student never sees its own mistakes corrected. The history logs reverse KL per token, greedy accuracy and mean length on one fixed seeded task set for both modes.
+
+### Constitutional AI ([`cai.py`](src/minigpt/cai.py))
+
+Not on addition tasks: this stage uses the Alpaca chat model from `runs/sft` and a judge LLM (Ollama) instead of a verifiable reward.
+
+- **What:** the judge critiques the SFT model's answers against a random principle from a 7-line [constitution](docs/cai/constitution.md) and rewrites them; SFT on the rewrites is SL-CAI. The SL-CAI model then samples 2 answers per prompt, the judge picks the better one under a random principle (A/B order randomised, position-bias rate recorded), and DPO on those pairs is RL-CAI. 128 PG prompts in [`prompts.json`](docs/cai/prompts.json); the last 20 are held out for `cai-eval`.
+- **Mirrors:** [Bai et al. 2022, Constitutional AI](https://arxiv.org/abs/2212.08073), the public method behind the Claude Opus 5.5 system card's statement that post-training aligns the model "with the values described in Claude's constitution". The constitution text is original, inspired by [Anthropic's](https://www.anthropic.com/constitution). One departure: DPO replaces the paper's preference model + RL.
+- **Run** (needs `runs/sft` and the judge, e.g. `ssh -L 11434:localhost:11434 Korea`):
+
+```bash
+uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl   # writes runs/cai_sl
+uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl   # writes runs/cai_rl
+uv run minigpt cai-eval   # judge scores held-out prompts 1-5: sft vs cai_sl vs cai_rl
+```
+
+- **Lesson to test:** the labels are only as good as the judge reading a text file; `runs/cai/pairs_stats.json` shows how often it just picked the slot shown first.
 
 ## Design decisions
 
