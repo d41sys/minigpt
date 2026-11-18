@@ -64,24 +64,6 @@ Tests: `uv run pytest -q` (CI runs ruff, mypy and pytest on pushes to `main` and
 needs internet and the extras:
 `uv run --extra hf --extra test pytest -m network`.
 
-## Post-training stages
-
-Small-scale copies of post-training steps that labs describe publicly. Each stage is one module plus CLI subcommands, and checkpoints go to `runs/<stage>/ckpt.pt`. No stage here has been run yet, so there are no results.
-
-### Constitutional AI (`cai.py`)
-
-- **What:** a judge LLM (Ollama) critiques the SFT model's answers against a random principle from a 7-line [constitution](docs/cai/constitution.md) and rewrites them; SFT on the rewrites is SL-CAI. The SL-CAI model then samples 2 answers per prompt, the judge picks the better one under a random principle (A/B order randomised, position-bias rate recorded), and DPO on those pairs is RL-CAI. 128 PG prompts in [`prompts.json`](docs/cai/prompts.json); the last 20 are held out for `cai-eval`.
-- **Mirrors:** [Bai et al. 2022, Constitutional AI](https://arxiv.org/abs/2212.08073), the public method behind the Claude Opus 5.5 system card's statement that post-training aligns the model "with the values described in Claude's constitution". Constitution text is original, inspired by [Anthropic's](https://www.anthropic.com/constitution). One departure: DPO replaces the paper's preference model + RL.
-- **Run** (needs `runs/sft` and the judge, e.g. `ssh -L 11434:localhost:11434 Korea`):
-
-```bash
-uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl
-uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl
-uv run minigpt cai-eval   # judge scores held-out prompts 1-5: sft vs cai_sl vs cai_rl
-```
-
-- **Lesson:** the labels are only as good as the judge reading a text file; `runs/cai/pairs_stats.json` shows how often it just picked the slot shown first.
-
 ## Results
 
 All numbers come from one run on an Apple-silicon Mac (`device=mps`), seed 0, with the
@@ -265,6 +247,22 @@ Small-scale copies of post-training stages that labs describe publicly, run on v
 The student samples its own completions and, at every completion token, minimises the full-vocabulary KL between its next-token distribution and a frozen teacher's on that same prefix ([`opd.py`](src/minigpt/opd.py)). Mirrors the last stage of [DeepSeek-V4.1](https://arxiv.org/html/2609.19969) (§5.2.4, full-vocabulary OPD); background: [MiniLLM](https://arxiv.org/abs/2306.08543) (Gu et al. 2024) and [Thinking Machines, "On-policy distillation"](https://thinkingmachines.ai/blog/on-policy-distillation/) (2025).
 Run: `minigpt opd` (teacher `runs/grpo/ckpt.pt`, student `runs/reason_sft/ckpt.pt` or `--student-config 64,2,4`; writes `runs/opd/ckpt.pt`). `--kl forward` swaps the direction; `--off-policy` is the baseline where the teacher samples and the student does plain SFT on those samples (`runs/opd/off_policy/ckpt.pt`).
 Lessons to test: reverse KL is mode-seeking (the student commits to one teacher mode) and forward KL is mode-covering; training on the student's own prefixes is meant to fix exposure bias, since an off-policy student never sees its own mistakes corrected. The history logs reverse KL per token, greedy accuracy and mean length on one fixed seeded task set for both modes.
+
+### Constitutional AI ([`cai.py`](src/minigpt/cai.py))
+
+Not on addition tasks: this stage uses the Alpaca chat model from `runs/sft` and a judge LLM (Ollama) instead of a verifiable reward.
+
+- **What:** the judge critiques the SFT model's answers against a random principle from a 7-line [constitution](docs/cai/constitution.md) and rewrites them; SFT on the rewrites is SL-CAI. The SL-CAI model then samples 2 answers per prompt, the judge picks the better one under a random principle (A/B order randomised, position-bias rate recorded), and DPO on those pairs is RL-CAI. 128 PG prompts in [`prompts.json`](docs/cai/prompts.json); the last 20 are held out for `cai-eval`.
+- **Mirrors:** [Bai et al. 2022, Constitutional AI](https://arxiv.org/abs/2212.08073), the public method behind the Claude Opus 5.5 system card's statement that post-training aligns the model "with the values described in Claude's constitution". The constitution text is original, inspired by [Anthropic's](https://www.anthropic.com/constitution). One departure: DPO replaces the paper's preference model + RL.
+- **Run** (needs `runs/sft` and the judge, e.g. `ssh -L 11434:localhost:11434 Korea`):
+
+```bash
+uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl   # writes runs/cai_sl
+uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl   # writes runs/cai_rl
+uv run minigpt cai-eval   # judge scores held-out prompts 1-5: sft vs cai_sl vs cai_rl
+```
+
+- **Lesson to test:** the labels are only as good as the judge reading a text file; `runs/cai/pairs_stats.json` shows how often it just picked the slot shown first.
 
 ## Design decisions
 
