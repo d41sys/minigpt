@@ -1303,9 +1303,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("reason-sft", help="cold-start SFT on reference chain-of-thought traces")
     s.add_argument("--base", default=str(REASON_PRETRAIN_CKPT))
-    s.add_argument("--n", type=int, default=500, help="traces")
+    s.add_argument("--n", type=int, default=20000, help="traces")
     s.add_argument("--max-digits", type=int, default=3)
-    s.add_argument("--epochs", type=int, default=15)
+    s.add_argument("--epochs", type=int, default=3)
     s.add_argument("--batch-size", type=int, default=16)
     s.add_argument("--lr", type=float, default=5e-4)
     s.add_argument("--seed", type=int, default=0)

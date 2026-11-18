@@ -247,7 +247,7 @@ Small-scale copies of post-training stages that labs describe publicly, run on v
 
 ### Reasoning base: pretrain, cold-start SFT, eval
 
-`reason-pretrain` trains a 4-layer, d=128 GPT on 50,000 bare equations `a+b=c` (digits 1-4, byte-level tokens); `reason-sft` then fine-tunes it on 500 reference traces `<think>7+5+0=12 4+8+1=13</think><answer>132</answer>` (digits 1-3) with the prompt masked, reusing `sft.train_sft`. This is the "SFT followed by RL" start of [DeepSeek-V4.1](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf) §5.1.
+`reason-pretrain` trains a 4-layer, d=128 GPT on 50,000 bare equations `a+b=c` (digits 1-4, byte-level tokens); `reason-sft` then fine-tunes it on 20,000 reference traces `<think>7+5+0=12 4+8+1=13</think><answer>132</answer>` (digits 1-3, 3 epochs) with the prompt masked, reusing `sft.train_sft`. This is the "SFT followed by RL" start of [DeepSeek-V4.1](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf) §5.1. The first default, 500 traces × 15 epochs, learned the format but not to copy operands (`9+4=` → `<think>8+7+0=14…`; 1-digit accuracy 0.20), which left RL nothing to sharpen.
 Run: `minigpt reason-pretrain && minigpt reason-sft` (writes `runs/reason_pretrain`, `runs/reason_sft`), then `minigpt reason-eval --checkpoint runs/reason_sft/ckpt.pt`: greedy decoding on 50 fixed seeded tasks per digit count 1-5, reporting accuracy, format rate and mean completion tokens (`reason.evaluate_reasoning`).
 Lesson to test: the SFT model is trained on 1-3 digits only, so 4-5 digit rows show whether it learned the column procedure or memorised short sums.
 
@@ -289,6 +289,20 @@ uv run minigpt cai-eval   # judge scores held-out prompts 1-5: sft vs cai_sl vs 
 Classic RLHF ([`rlhf.py`](src/minigpt/rlhf.py)): a program stands in for the human labeler (answer correct + format correct) and ranks `k` SFT samples per prompt; a Bradley-Terry reward model (SFT body + scalar head on the last non-pad token, 20% of pairs held out) is fit to the pairs; PPO then maximises its score with GAE (γ=1, λ=0.95), clipped policy and value losses, a per-token KL penalty to the SFT policy and a value head on the policy. Mirrors [InstructGPT](https://arxiv.org/abs/2203.02155) (Ouyang et al. 2022), the recipe DPO and GRPO later replaced; the Claude Opus 5.5 system card describes crowd workers doing preference selection, which the labeler program replaces here.
 Run: `minigpt reward-model` (reads `runs/reason_sft/ckpt.pt`, prints held-out pairwise accuracy, writes `runs/rm/ckpt.pt`), then `minigpt ppo` (writes `runs/ppo/ckpt.pt` and `runs/ppo/history.json`; `--sft` on both points at another policy checkpoint).
 Lesson to test ([Gao et al. 2022](https://arxiv.org/abs/2210.10760), reward-model overoptimization): the exact checker is a gold reward, so the history logs the proxy (reward-model) score next to gold accuracy, KL, value loss and length at every step. Overoptimization would show as the proxy still rising while gold accuracy falls from its peak; `minigpt ppo` prints both so a run can show it or not. The Claude Opus 5.5 card reports training snapshots that "concealed actions from an automated grader"; here the grader is learned and any exploit would live in the reward model.
+
+### Results: one run on an M-series Mac (MPS), seed 0
+
+Single seed, 50 greedy tasks per digit count (64 for OPD), so differences of a few points are noise. Logs are not committed; rerun the commands above.
+
+| Stage | Result |
+|---|---|
+| `reason-sft` (20k traces, 53 s) | accuracy 1/2/3/4/5 digits: 0.98 / 0.94 / 0.86 / 0.00 / 0.00 |
+| `grpo` (200 steps, 2.5 min) | 1.00 / 1.00 / 1.00 / 0.00 / 0.00. RL sharpened what SFT could already do; it cannot reach 4-5 digits, where every group is all-wrong and is dropped (zero advantage) |
+| `hack-demo` | from this strong SFT the exploit never paid: hack rate 0.003 → 0.002, because correct answers already max the lenient grader. From the weak 500-trace SFT it did: hack rate 0.077 → 0.197 while true accuracy fell 0.048 → 0.001. Monitor recall 0.92, precision 0.04: hacks are rare here, so most flags land on ordinary wrong or malformed answers |
+| `reward-model` | 232 pairs; held-out pairwise accuracy **0.500**, i.e. chance: the RM learned nothing (on the weak SFT it reached 0.707) |
+| `ppo` against that RM | proxy +0.625 → +0.812 while gold accuracy fell from 0.891 (step 2) to 0.759: optimising a reward model that carries no signal costs real accuracy |
+| `opd` (student = SFT, teacher = GRPO, same size) | reverse KL started at 0.013 nats/token, so there was little to distill: greedy accuracy 0.94 → 0.86 on-policy, 0.94 → 0.92 off-policy, both within noise of 64 tasks |
+| CAI (`qwen3:8b` judge on 20 held-out prompts) | adherence 1-5: sft 1.00, cai_sl 1.25, cai_rl 1.45, no CI. The RL-CAI labels picked the first-shown answer 86.1% of the time (93/108), so DPO mostly learned position noise |
 
 ## Design decisions
 
