@@ -76,7 +76,7 @@ def strict_pair(scores: list[float], rng: random.Random) -> tuple[int, int] | No
     return rng.choice(best), rng.choice(worst)
 
 
-def label_pairs(
+def label_ranked_pairs(
     policy: GPTModel,
     tok: BPETokenizer,
     tasks: list[Task],

@@ -67,7 +67,7 @@ from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
 from minigpt.reason import make_task, reasoning_tokenizer
 from minigpt.rlhf import (
-    label_pairs,
+    label_ranked_pairs,
     load_reward_model,
     new_reward_model,
     overopt_summary,
@@ -611,7 +611,7 @@ def cmd_reward_model(args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
     tasks = [make_task(rng, rng.randint(1, args.max_digits)) for _ in range(args.tasks)]
     print(f"device={device} sampling {args.k} completions for each of {args.tasks} tasks")
-    pairs = label_pairs(sft, tok, tasks, args.k, args.max_new_tokens, rng)
+    pairs = label_ranked_pairs(sft, tok, tasks, args.k, args.max_new_tokens, rng)
     if len(pairs) < 10:
         sys.exit(f"only {len(pairs)} strictly ordered pairs: the SFT policy is too uniform")
     print(f"{len(pairs)} labeled pairs, the last 20% held out for RM eval")
