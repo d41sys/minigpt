@@ -91,9 +91,11 @@ def test_classifier_head_swap_and_freeze() -> None:
     assert logits.shape == (1, 2) and loss is not None
 
 
-def test_classifier_ignores_padding() -> None:
+@pytest.mark.parametrize("pos_encoding", ["learned", "rope"])
+def test_classifier_ignores_padding(pos_encoding: str) -> None:
     torch.manual_seed(0)
-    model = GPTForClassification(GPTModel(TINY), pad_id=0).eval()
+    gpt = GPTModel(GPTConfig(**{**TINY.__dict__, "pos_encoding": pos_encoding}))
+    model = GPTForClassification(gpt, pad_id=0).eval()
     a, _ = model(torch.tensor([[5, 6, 7, 0, 0]]))
     b, _ = model(torch.tensor([[5, 6, 7, 0, 0, 0, 0]]))
     assert torch.allclose(a, b, atol=1e-5)
