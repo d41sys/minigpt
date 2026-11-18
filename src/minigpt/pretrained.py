@@ -90,7 +90,6 @@ def load_hf_gpt2_weights(
     model_state = model.state_dict()
 
     loaded_keys: list[str] = []
-    skipped_keys: list[str] = []
 
     with torch.no_grad():
         for hf_key, hf_val in state_dict.items():
@@ -101,7 +100,6 @@ def load_hf_gpt2_weights(
                 continue
 
             if minigpt_key not in model_state:
-                skipped_keys.append(hf_key)
                 continue
 
             tensor = hf_val
@@ -116,6 +114,11 @@ def load_hf_gpt2_weights(
 
             model_state[minigpt_key].copy_(tensor)
             loaded_keys.append(minigpt_key)
+
+    # lm_head.weight is tied to wte; non-persistent buffers are not in state_dict at all.
+    missing = sorted(set(model_state) - set(loaded_keys) - {"lm_head.weight"})
+    if missing:
+        raise ValueError(f"Checkpoint is missing {len(missing)} model keys, e.g. {missing[:3]}")
 
     if device is not None:
         model.to(device)
