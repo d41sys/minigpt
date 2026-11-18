@@ -15,6 +15,7 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -22,6 +23,7 @@ import torch.nn.functional as F
 
 from minigpt.bpe import BPETokenizer
 from minigpt.model import GPTModel
+from minigpt.sft import SFTDataset
 
 ANSWER_RE = re.compile(r"<answer>(\d+)</answer>")
 FORMAT_RE = re.compile(r"<think>[^<]*</think><answer>\d+</answer>")
@@ -143,3 +145,53 @@ def per_token_log_probs(
         F.log_softmax(logits.float(), dim=-1), 2, labels.clamp(min=0).unsqueeze(2)
     ).squeeze(2)
     return logps * mask, mask
+
+
+def decode_completion(tok: BPETokenizer, ids: list[int]) -> str:
+    """Completion text without the EOS token."""
+    return tok.decode([i for i in ids if i != tok.eos_token_id])
+
+
+def sft_trace_dataset(tasks: list[Task], tok: BPETokenizer) -> SFTDataset:
+    """Cold-start SFT data (DeepSeek-R1 style): raw prompt, reference trace + EOS, prompt masked."""
+    ds = SFTDataset([], tok)
+    for t in tasks:
+        x, y = build_batch(
+            [tok.encode(t.prompt)], [[*tok.encode(t.solution()), tok.eos_token_id]], pad_id=0
+        )
+        ds.examples.append((x[0], y[0]))
+    return ds
+
+
+@torch.no_grad()
+def evaluate_reasoning(
+    model: GPTModel,
+    tok: BPETokenizer,
+    n_per_digit: int = 50,
+    seed: int = 0,
+    max_new_tokens: int = 100,
+) -> dict[str, Any]:
+    """Greedy accuracy, format rate and mean completion tokens (EOS included) on fixed tasks.
+
+    `n_per_digit` tasks for each digit count 1-5, drawn from `Random(seed)`, so every model is
+    scored on the same tasks. Returns the overall means plus `per_digit[d]`.
+    """
+    rng = random.Random(seed)
+    device = next(model.parameters()).device
+    eos = tok.eos_token_id
+    per_digit: dict[int, dict[str, float]] = {}
+    for d in range(1, 6):
+        tasks = [make_task(rng, d) for _ in range(n_per_digit)]
+        # Both operands have d digits, so every prompt of this group has the same length.
+        x = torch.tensor([tok.encode(t.prompt) for t in tasks], dtype=torch.long, device=device)
+        out = model.generate(x, max_new_tokens, temperature=0.0, eos_token_id=eos)
+        rows = [r[: r.index(eos) + 1] if eos in r else r for r in out[:, x.size(1) :].tolist()]
+        texts = [decode_completion(tok, r) for r in rows]
+        correct = [accuracy_reward(t, s) for t, s in zip(tasks, texts, strict=True)]
+        per_digit[d] = {
+            "accuracy": sum(correct) / n_per_digit,
+            "format": sum(format_reward(s) for s in texts) / n_per_digit,
+            "mean_tokens": sum(len(r) for r in rows) / n_per_digit,
+        }
+    overall = {k: sum(v[k] for v in per_digit.values()) / len(per_digit) for k in per_digit[1]}
+    return {**overall, "per_digit": per_digit}

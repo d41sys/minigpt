@@ -58,6 +58,9 @@ uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl   # Co
 uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl
 uv run minigpt eval
 uv run minigpt eval --n 100 --paired-vs sft --checkpoints sft=runs/sft/ckpt.pt,dpo=runs/dpo/ckpt.pt
+uv run minigpt reason-pretrain && uv run minigpt reason-sft && uv run minigpt reason-eval   # addition base model, runs/reason_*
+uv run minigpt grpo                                # GRPO from runs/reason_sft, writes runs/grpo
+uv run minigpt hack-demo                           # GRPO against a hackable grader + CoT monitor
 ```
 
 Tests: `uv run pytest -q` (CI runs ruff, mypy and pytest on pushes to `main` and on every PR). Release: push a tag `vX.Y.Z` matching `pyproject.toml`'s version; CI reruns, then the wheel and sdist are attached to a GitHub Release. The GPT-2 parity test
@@ -241,6 +244,23 @@ The default change affects only new runs. SFT, DPO, the spam classifier and the 
 ## Post-training stages
 
 Small-scale copies of post-training stages that labs describe publicly, run on verifiable addition tasks ([`reason.py`](src/minigpt/reason.py)). The sources are cited for the stage's shape only; nothing here claims to reproduce their results. No stage has been run yet, so no results are reported.
+
+### Reasoning base: pretrain, cold-start SFT, eval
+
+`reason-pretrain` trains a 4-layer, d=128 GPT on 50,000 bare equations `a+b=c` (digits 1-4, byte-level tokens); `reason-sft` then fine-tunes it on 500 reference traces `<think>7+5+0=12 4+8+1=13</think><answer>132</answer>` (digits 1-3) with the prompt masked, reusing `sft.train_sft`. This is the "SFT followed by RL" start of [DeepSeek-V4.1](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf) §5.1.
+Run: `minigpt reason-pretrain && minigpt reason-sft` (writes `runs/reason_pretrain`, `runs/reason_sft`), then `minigpt reason-eval --checkpoint runs/reason_sft/ckpt.pt`: greedy decoding on 50 fixed seeded tasks per digit count 1-5, reporting accuracy, format rate and mean completion tokens (`reason.evaluate_reasoning`).
+Lesson to test: the SFT model is trained on 1-3 digits only, so 4-5 digit rows show whether it learned the column procedure or memorised short sums.
+
+### GRPO with verifiable rewards
+
+Per step: sample tasks from a digit range, draw G completions each, reward = accuracy + 0.1 · format, advantage = `(r − group mean) / (std + eps)`, PPO-clipped ratio against the sampling policy plus β · k3 KL to the frozen SFT model ([`grpo.py`](src/minigpt/grpo.py)). Groups whose rewards are all equal have zero advantage and are dropped (the drop rate is logged). Mirrors the RL stage of [DeepSeek-V4.1](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf) (§5.1 "SFT followed by RL and on-policy distillation" with no algorithmic novelty, verifiable tasks with difficulty calibration and filtering; §5.2 GRPO groups).
+Run: `minigpt grpo` (200 steps, B=8 tasks, G=8; writes `runs/grpo/ckpt.pt` and `history.json` with reward, accuracy, format, length, KL and drop rate per step). `--no-std-norm` and `--loss-agg token-sum` are the Dr. GRPO variants; `--mu` sets inner epochs.
+Lesson to test: length bias (§5.2.2, short samples dominate early batches). `seq-mean` divides each sequence by its own length, so tokens of short completions weigh more; `token-sum` divides by one constant. Compare the `length` column of the two runs.
+
+### CoT monitor and reward hacking
+
+`hack-demo` runs the same GRPO from the same SFT checkpoint but with a deliberately hackable grader, `lenient_reward` ([`monitor.py`](src/minigpt/monitor.py)): it gives 1.0 when the true answer appears as a substring anywhere in the completion, so `<answer>0</answer> 132` scores 1.0 for 47+85. The history tracks the proxy reward and the true `accuracy_reward`; their gap is the reward hacking. A rule-based CoT monitor flags a completion when the think steps do not compute the stated answer (it recomputes each column and carry) or when content sits outside the format, and the run reports its flag rate plus its precision and recall against "proxy reward 1 and true reward 0". Mirrors the chain-of-thought monitoring and metagaming findings of the [GPT-6 Astra system card](https://deploymentsafety.openai.com/gpt-6-astra), the note in the [Claude Opus 5.5 system card](https://www.anthropic.com/document/claude-opus-5-5-system-card) that some snapshots "concealed actions from an automated grader", and the grader "hackability" inspection of DeepSeek-V4.1 §5.1.
+Run: `minigpt hack-demo` (writes `runs/hack_demo/ckpt.pt`, `history.json`). Lesson to test: whether the proxy rises while true accuracy stalls or falls, and whether the monitor flags the exploit before the proxy-true gap is obvious. The monitor sees only the completion, so a self-consistent trace for the wrong operands passes it.
 
 ### On-policy distillation (OPD)
 
