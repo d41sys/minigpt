@@ -194,7 +194,7 @@ def train_opd(
         else:
             loss = opd_loss(student, teacher, x, y, kl)
         optimizer.zero_grad()
-        loss.backward()
+        loss.backward()  # type: ignore[no-untyped-call]
         torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
         optimizer.step()
         run_loss += loss.item()
