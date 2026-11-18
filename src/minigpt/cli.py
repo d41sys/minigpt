@@ -185,6 +185,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         dropout=args.dropout,
+        pos_encoding=args.pos_encoding,
         use_sdpa=True,
     )
     model = GPTModel(cfg)
@@ -568,6 +569,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--eval-interval", type=int, default=200)
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--dropout", type=float, default=0.1)
+    s.add_argument(
+        "--pos-encoding",
+        choices=["learned", "rope"],
+        default="learned",
+        help="position encoding: learned table (GPT-2 style, default) or rotary (RoPE)",
+    )
     s.add_argument(
         "--sampling",
         choices=["aligned", "random"],

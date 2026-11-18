@@ -15,7 +15,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 |---|---|---|
 | Tokenizer | `bpe.py` | byte-level BPE trainer/encoder/decoder, GPT-2 pre-tokenisation regex, JSON save/load, special tokens |
 | Data | `data.py` | sliding-window `(x, y)` next-token dataset |
-| Model | `model.py` | token + learned position embeddings, own causal MHA (optional `F.scaled_dot_product_attention`), pre-LN blocks, GELU MLP, weight-tied head, `generate(temperature, top_k)` |
+| Model | `model.py` | token + learned position embeddings (or RoPE via `--pos-encoding rope`), own causal MHA (optional `F.scaled_dot_product_attention`), pre-LN blocks, GELU MLP, weight-tied head, `generate(temperature, top_k)` with a per-layer KV cache (O(T) per new token instead of O(T²); falls back to crop-and-recompute past the context length) |
 | Training | `train.py` | AdamW (decay on 2-D weights only), linear warmup + cosine LR, clip 1.0, periodic eval, best-val checkpoint, device mps → cuda → cpu |
 | Pretrained | `pretrained.py` | HF GPT-2 124M safetensors → `GPTConfig(50257, 1024, 768, 12, 12)`, Conv1D transposes |
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
@@ -76,7 +76,7 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 42 passed, 1 deselected (network) in 6 s on CI |
+| Unit tests | `pytest` | 48 passed, 1 deselected (network) in 6 s on CI |
 
 ### Evaluation pipeline
 

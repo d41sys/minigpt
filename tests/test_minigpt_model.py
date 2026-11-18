@@ -59,6 +59,39 @@ def test_generate_greedy_is_deterministic() -> None:
     assert torch.equal(sampled, out1[:, :8])
 
 
+@pytest.mark.parametrize("pos_encoding", ["learned", "rope"])
+@pytest.mark.parametrize("use_sdpa", [False, True])
+def test_kv_cache_generate_matches_full_recompute(use_sdpa: bool, pos_encoding: str) -> None:
+    torch.manual_seed(0)
+    cfg = GPTConfig(**{**TINY.__dict__, "use_sdpa": use_sdpa, "pos_encoding": pos_encoding})
+    model = GPTModel(cfg)
+    x = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    # 3 + 20 > context_length 16, so this also covers the crop-and-recompute fallback.
+    cached = model.generate(x, 20, temperature=0.0)
+    reference = model.generate(x, 20, temperature=0.0, use_cache=False)
+    assert torch.equal(cached, reference)
+
+
+def test_rope_has_no_wpe_and_depends_on_token_order() -> None:
+    torch.manual_seed(0)
+    model = GPTModel(GPTConfig(**{**TINY.__dict__, "pos_encoding": "rope"})).eval()
+    assert not hasattr(model, "wpe")
+    assert not any("wpe" in name for name, _ in model.named_parameters())
+    a = torch.tensor([[1, 2, 3, 4, 5]])
+    b = torch.tensor([[2, 1, 3, 4, 5]])
+    la, _ = model(a)
+    lb, _ = model(b)
+    assert la.shape == (1, 5, 64)
+    assert not torch.allclose(la[0, -1], lb[0, -1])
+
+
+def test_no_bias_keeps_layernorm_scale() -> None:
+    model = GPTModel(GPTConfig(**{**TINY.__dict__, "bias": False}))
+    for ln in (model.blocks[0].ln_1, model.blocks[0].ln_2, model.ln_f):
+        assert ln.weight is not None
+        assert ln.bias is None
+
+
 def test_lr_schedule_warmup_and_cosine() -> None:
     assert get_lr_multiplier(0, 10, 100) == pytest.approx(0.1)
     assert get_lr_multiplier(9, 10, 100) == pytest.approx(1.0)
