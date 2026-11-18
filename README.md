@@ -21,6 +21,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
+| Constitutional AI | `cai.py` | judge-LLM critique/revise (SL) and A/B preference labels (RL) under random constitution principles; Ollama judge behind an injectable `ChatJudge` protocol |
 | Eval | `evaluate.py` | perplexity, exact match, token F1, likelihood ranking, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
 
 ## Architecture
@@ -53,6 +54,8 @@ uv run minigpt generate --prompt "ROMEO:"
 uv run minigpt data spam && uv run minigpt finetune-cls
 uv run minigpt data alpaca && uv run minigpt sft
 uv run minigpt dpo
+uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl   # Constitutional AI (judge on :11434)
+uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl
 uv run minigpt eval
 uv run minigpt eval --n 100 --paired-vs sft --checkpoints sft=runs/sft/ckpt.pt,dpo=runs/dpo/ckpt.pt
 ```
@@ -60,6 +63,24 @@ uv run minigpt eval --n 100 --paired-vs sft --checkpoints sft=runs/sft/ckpt.pt,d
 Tests: `uv run pytest -q` (CI runs ruff, mypy and pytest on pushes to `main` and on every PR). Release: push a tag `vX.Y.Z` matching `pyproject.toml`'s version; CI reruns, then the wheel and sdist are attached to a GitHub Release. The GPT-2 parity test
 needs internet and the extras:
 `uv run --extra hf --extra test pytest -m network`.
+
+## Post-training stages
+
+Small-scale copies of post-training steps that labs describe publicly. Each stage is one module plus CLI subcommands, and checkpoints go to `runs/<stage>/ckpt.pt`. No stage here has been run yet, so there are no results.
+
+### Constitutional AI (`cai.py`)
+
+- **What:** a judge LLM (Ollama) critiques the SFT model's answers against a random principle from a 7-line [constitution](docs/cai/constitution.md) and rewrites them; SFT on the rewrites is SL-CAI. The SL-CAI model then samples 2 answers per prompt, the judge picks the better one under a random principle (A/B order randomised, position-bias rate recorded), and DPO on those pairs is RL-CAI. 128 PG prompts in [`prompts.json`](docs/cai/prompts.json); the last 20 are held out for `cai-eval`.
+- **Mirrors:** [Bai et al. 2022, Constitutional AI](https://arxiv.org/abs/2212.08073), the public method behind the Claude Opus 5.5 system card's statement that post-training aligns the model "with the values described in Claude's constitution". Constitution text is original, inspired by [Anthropic's](https://www.anthropic.com/constitution). One departure: DPO replaces the paper's preference model + RL.
+- **Run** (needs `runs/sft` and the judge, e.g. `ssh -L 11434:localhost:11434 Korea`):
+
+```bash
+uv run minigpt cai-data --stage sl && uv run minigpt cai-train --stage sl
+uv run minigpt cai-data --stage rl && uv run minigpt cai-train --stage rl
+uv run minigpt cai-eval   # judge scores held-out prompts 1-5: sft vs cai_sl vs cai_rl
+```
+
+- **Lesson:** the labels are only as good as the judge reading a text file; `runs/cai/pairs_stats.json` shows how often it just picked the slot shown first.
 
 ## Results
 

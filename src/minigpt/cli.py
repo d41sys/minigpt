@@ -1,8 +1,9 @@
-"""minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, eval, generation.
+"""minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, CAI, eval, generation.
 
 Pipeline: `pretrain` writes runs/pretrain/ckpt.pt; `finetune-cls` and `sft` start from it;
 `dpo` starts from runs/sft/ckpt.pt; `opd` distils runs/grpo/ckpt.pt into a smaller student;
 `eval` reports on whatever checkpoints exist.
+`cai-data` / `cai-train` (sl, then rl) turn runs/sft into runs/cai_sl and runs/cai_rl.
 """
 
 from __future__ import annotations
@@ -20,6 +21,16 @@ import torch
 from torch.utils.data import DataLoader
 
 from minigpt.bpe import BPETokenizer
+from minigpt.cai import (
+    JudgeError,
+    OllamaChat,
+    adherence_report,
+    label_pairs,
+    load_principles,
+    revise_rows,
+    sample_responses,
+    split_prompts,
+)
 from minigpt.data import create_dataloader, split_val_test
 from minigpt.dpo import (
     PreferenceDataset,
@@ -81,7 +92,11 @@ GRPO_CKPT = Path("runs/grpo/ckpt.pt")
 REASON_SFT_CKPT = Path("runs/reason_sft/ckpt.pt")
 OPD_CKPT = Path("runs/opd/ckpt.pt")
 OPD_OFF_POLICY_CKPT = Path("runs/opd/off_policy/ckpt.pt")
+CAI_DIR = Path("runs/cai")
+CAI_SL_CKPT = Path("runs/cai_sl/ckpt.pt")
+CAI_RL_CKPT = Path("runs/cai_rl/ckpt.pt")
 SFT_HELDOUT = 100  # last N Alpaca rows are never trained on
+CAI_HELDOUT = 20  # last N CAI prompts are never trained on
 
 
 def seed_everything(seed: int) -> None:
@@ -438,6 +453,133 @@ def cmd_opd(args: argparse.Namespace) -> None:
     print(f"checkpoint -> {out}")
 
 
+def connect_judge(args: argparse.Namespace) -> OllamaChat:
+    """Judge from --judge-url/--judge-model; exits with a clear message if it is unreachable."""
+    judge = OllamaChat(args.judge_url, args.judge_model)
+    try:
+        judge.chat('Reply as JSON: {"ok": true}')
+    except JudgeError as err:
+        sys.exit(str(err))
+    return judge
+
+
+def cai_prompts(args: argparse.Namespace) -> tuple[list[str], list[str], list[str]]:
+    """(principles, train prompts, held-out prompts) from --constitution and --prompts."""
+    principles = load_principles(Path(args.constitution).read_text(encoding="utf-8"))
+    prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))
+    return (principles, *split_prompts(prompts, args.heldout))
+
+
+def cmd_cai_data(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = load_tokenizer()
+    sl = args.stage == "sl"
+    base = require(SFT_CKPT, "sft") if sl else require(CAI_SL_CKPT, "cai-train --stage sl")
+    model = load_model(base).to(device)
+    principles, prompts, _ = cai_prompts(args)
+    judge = connect_judge(args)
+    rng = random.Random(args.seed)
+    out = Path(args.out or CAI_DIR / ("sl.json" if sl else "pairs.json"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    def sample(prompt: str, n: int) -> list[str]:
+        return sample_responses(
+            model, tok, prompt, n, device, args.temperature, args.max_new_tokens
+        )
+
+    print(f"device={device} stage={args.stage} prompts={len(prompts)} principles={len(principles)}")
+    if sl:
+        answers = [(p, sample(p, 1)[0]) for p in prompts]
+        records, stats = revise_rows(judge, principles, answers, rng)
+        out.write_text(json.dumps(records, indent=1) + "\n", encoding="utf-8")
+        print(f"{stats['n_records']} of {stats['n_rows']} revisions kept (rest: bad judge reply)")
+    else:
+        rows: list[tuple[str, str, str]] = []
+        for p in prompts:
+            x, y = sample(p, 2)
+            rows.append((p, x, y))
+        pairs, pstats = label_pairs(judge, principles, rows, rng)
+        out.write_text(json.dumps([vars(s) for s in pairs], indent=1) + "\n", encoding="utf-8")
+        stats_out = out.with_name("pairs_stats.json")
+        stats_out.write_text(json.dumps(pstats, indent=1) + "\n", encoding="utf-8")
+        print(f"{pstats['n_pairs']:.0f} of {pstats['n_rows']:.0f} pairs kept (rest: bad or equal)")
+        print(f"position bias: first-shown answer won {pstats['position_bias']:.1%} (ideal 50%)")
+        print(f"stats -> {stats_out}")
+    print(f"data -> {out}")
+
+
+def cmd_cai_train(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = load_tokenizer()
+    sl = args.stage == "sl"
+    base = require(SFT_CKPT, "sft") if sl else require(CAI_SL_CKPT, "cai-train --stage sl")
+    data = require(CAI_DIR / ("sl.json" if sl else "pairs.json"), f"cai-data --stage {args.stage}")
+    items = json.loads(data.read_text(encoding="utf-8"))
+    policy = load_model(base)
+    ctx = policy.config.context_length
+    epochs = args.epochs or (3 if sl else 2)
+    lr = args.lr or (1e-4 if sl else 1e-5)
+    if sl:
+        ds = SFTDataset(items, tok, max_length=ctx)
+        print(f"device={device} cai_sl_examples={len(ds)} base={base}")
+        res = train_sft(
+            policy, ds, epochs=epochs, batch_size=args.batch_size, learning_rate=lr, device=device
+        )
+        for row in res["history"]:
+            print(f"epoch {row['epoch']} loss {row['loss']:.4f}")
+        out = CAI_SL_CKPT
+    else:
+        pds = PreferenceDataset([PreferenceSample(**d) for d in items], tok, max_length=ctx)
+        print(f"device={device} cai_rl_pairs={len(pds)} beta={args.beta} base={base}")
+        res = train_dpo(
+            policy, load_model(base), pds, beta=args.beta, epochs=epochs, lr=lr, device=device
+        )
+        print(f"step 1 dpo_loss {res['first_loss']:.4f} (log 2 = 0.6931)")
+        for row in res["history"]:
+            print(
+                f"epoch {int(row['epoch'])} mean dpo_loss {row['dpo_loss']:.4f} "
+                f"reward_accuracy {row['reward_accuracy']:.3f}"
+            )
+        out = CAI_RL_CKPT
+    save_checkpoint(out, policy, None, step=epochs, val_loss=res["final_loss"])
+    print(f"checkpoint -> {out}")
+
+
+def cmd_cai_eval(args: argparse.Namespace) -> None:
+    """Judge's mean 1-5 principle-adherence score of each checkpoint's greedy held-out answers."""
+    device = get_device()
+    tok = load_tokenizer()
+    principles, _, held = cai_prompts(args)
+    judge = connect_judge(args)
+    checkpoints = [("sft", SFT_CKPT), ("cai_sl", CAI_SL_CKPT), ("cai_rl", CAI_RL_CKPT)]
+    if args.checkpoints:
+        checkpoints = [
+            (name, Path(path))
+            for name, path in (item.split("=", 1) for item in args.checkpoints.split(","))
+        ]
+    print(f"held-out prompts={len(held)} judge={args.judge_model}")
+    print("\n| Model | Adherence (1-5) | Scored | Malformed judge replies |\n|---|---|---|---|")
+    for name, ckpt in checkpoints:
+        if not ckpt.exists():
+            print(f"| {name} | not run: {ckpt} missing | | |")
+            continue
+        model = load_model(ckpt).to(device)
+        answers = [sample_responses(model, tok, p, 1, device, temperature=0.0)[0] for p in held]
+        rep = adherence_report(judge, principles, held, answers)
+        print(f"| {name} | {rep['mean']:.2f} | {rep['n_scored']:.0f} | {rep['n_invalid']:.0f} |")
+
+
+def add_cai_args(s: argparse.ArgumentParser) -> None:
+    """Constitution, prompts and judge options shared by `cai-data` and `cai-eval`."""
+    s.add_argument("--constitution", default="docs/cai/constitution.md")
+    s.add_argument("--prompts", default="docs/cai/prompts.json")
+    s.add_argument("--heldout", type=int, default=CAI_HELDOUT, help="last N prompts: cai-eval set")
+    s.add_argument("--judge-url", default="http://localhost:11434", help="Ollama server")
+    s.add_argument("--judge-model", default="qwen3.6:27b-ctx4k")
+
+
 SHORT_ANSWER_MAX_WORDS = 5  # held-out rows with references this short form the EM set
 DEFAULT_EVAL_N = 50  # default `eval --n`; the paired table also reports F1 on these first rows
 
@@ -754,6 +896,33 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--out", default=None, help=f"default {OPD_CKPT} ({OPD_OFF_POLICY_CKPT} off)")
     s.set_defaults(func=cmd_opd)
+
+    s = sub.add_parser("cai-data", help="Constitutional AI data: SL revisions or RLAIF pairs")
+    s.add_argument("--stage", choices=["sl", "rl"], required=True)
+    s.add_argument("--temperature", type=float, default=0.7)
+    s.add_argument("--max-new-tokens", type=int, default=64)
+    s.add_argument("--out", default=None, help="default runs/cai/sl.json or runs/cai/pairs.json")
+    s.add_argument("--seed", type=int, default=0)
+    add_cai_args(s)
+    s.set_defaults(func=cmd_cai_data)
+
+    s = sub.add_parser("cai-train", help="SFT on revisions (sl) or DPO on AI pairs (rl)")
+    s.add_argument("--stage", choices=["sl", "rl"], required=True)
+    s.add_argument("--epochs", type=int, default=None, help="default 3 (sl) or 2 (rl)")
+    s.add_argument("--lr", type=float, default=None, help="default 1e-4 (sl) or 1e-5 (rl)")
+    s.add_argument("--batch-size", type=int, default=8, help="sl only; rl uses the DPO default")
+    s.add_argument("--beta", type=float, default=0.1, help="rl only")
+    s.add_argument("--seed", type=int, default=0)
+    s.set_defaults(func=cmd_cai_train)
+
+    s = sub.add_parser("cai-eval", help="judge scores held-out prompts for principle adherence")
+    s.add_argument(
+        "--checkpoints",
+        default=None,
+        help="comma-separated name=path list (default: sft, cai_sl, cai_rl)",
+    )
+    add_cai_args(s)
+    s.set_defaults(func=cmd_cai_eval)
 
     s = sub.add_parser("eval", help="perplexity + EM + token F1 + judge (mock or Ollama), weighted")
     s.add_argument(
