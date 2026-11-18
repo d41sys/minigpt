@@ -37,9 +37,9 @@ def test_window_losses_match_manual_cross_entropy_and_evaluate_loss() -> None:
         logits, _ = model(x[None])
     manual = torch.nn.functional.cross_entropy(logits[0], y).item()
     assert losses[3] == pytest.approx(manual, abs=1e-5)
-    # evaluate_loss weights every window equally even with a short last batch
-    assert evaluate_loss(model, loader, torch.device("cpu")) == pytest.approx(
-        float(np.mean(losses)), abs=1e-5
+    # evaluate_loss is the mean over the first max_batches batches (4 of the 5 windows here)
+    assert evaluate_loss(model, loader, torch.device("cpu"), max_batches=2) == pytest.approx(
+        float(np.mean(losses[:4])), abs=1e-5
     )
 
 

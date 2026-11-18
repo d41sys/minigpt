@@ -113,6 +113,8 @@ class PreferenceDataset(Dataset[dict[str, torch.Tensor]]):
                 input_text=s.input_text,
                 max_length=max_length,
             )
+            if not ((chosen_y != -100).any() and (rejected_y != -100).any()):
+                continue  # fully masked side: logp is 0, a degenerate pair
             self.items.append(
                 {
                     "chosen_input_ids": chosen_x,

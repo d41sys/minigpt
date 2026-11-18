@@ -207,6 +207,8 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         eval_interval=args.eval_interval,
         checkpoint_dir=Path("runs") / args.name,
         device=device,
+        grad_accum_steps=args.grad_accum,
+        bf16=args.bf16,
     )
     for row in res["history"]:
         print(
@@ -217,9 +219,6 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     print(f"val loss step0={v0:.4f} best={v1:.4f} drop={(v0 - v1) / v0 * 100:.1f}%")
     print(f"checkpoint -> {res['checkpoint_path']}")
     ckpt = Path(res["checkpoint_path"])
-    if not ckpt.exists():
-        print("no checkpoint beat the step-0 val loss; test loss not computed")
-        return
     payload = load_checkpoint(ckpt, model, device=device)
     losses = half_losses(model, {"val": val_ids, "test": test_ids}, args.batch_size, device)
     print(f"val-selected checkpoint (step {payload['step']}): {format_half_losses(losses)}")
@@ -582,6 +581,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="train windows: random offsets (stride 1, default) or aligned (stride = context)",
     )
     s.add_argument("--results-out", default=None, help="write per-run JSON (losses, history)")
+    s.add_argument(
+        "--grad-accum", type=int, default=1, help="micro-batches per optimizer step (default 1)"
+    )
+    s.add_argument("--bf16", action="store_true", help="bf16 autocast for forward and loss")
     s.set_defaults(func=cmd_pretrain)
 
     s = sub.add_parser("pretrain-eval", help="val-half and test-half loss of a checkpoint")

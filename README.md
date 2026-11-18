@@ -47,6 +47,7 @@ Run from the repo root. Downloads go to `data/raw/`, outputs to `runs/` (both gi
 ```bash
 uv run minigpt train-tokenizer                     # BPE, vocab 1024, on tiny-Shakespeare
 uv run minigpt pretrain --data tinyshakespeare --steps 2000   # random-offset windows; --sampling aligned = old recipe
+uv run minigpt pretrain --batch-size 16 --grad-accum 2 --bf16   # 2 micro-batches of 16 per step; bf16 autocast, no GradScaler
 uv run minigpt pretrain-eval                       # val-half and test-half loss of runs/pretrain/ckpt.pt
 uv run minigpt generate --prompt "ROMEO:"
 uv run minigpt data spam && uv run minigpt finetune-cls
@@ -76,7 +77,7 @@ All checkpoints were retrained from scratch after the repo split: pretrain, SFT 
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 48 passed, 1 deselected (network) in 6 s on CI |
+| Unit tests | `pytest` | 52 passed, 1 deselected (network) in 8 s on CI |
 
 ### Evaluation pipeline
 
