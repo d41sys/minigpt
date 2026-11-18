@@ -495,8 +495,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
             lo, hi = wilson_interval(wins, report.rank_n)
             rank_cells.append(f"{wins / report.rank_n:.3f} [{lo:.3f}, {hi:.3f}]")
         rank_lines.append(
-            f"| {name} | {rank_cells[0]} | {rank_cells[1]} | "
-            f"{report.stopped}/{report.stopped_n} |"
+            f"| {name} | {rank_cells[0]} | {rank_cells[1]} | {report.stopped}/{report.stopped_n} |"
         )
         shakespeare_ppl = compute_perplexity(model, shakespeare, device)
         em_lo, em_hi = wilson_interval(int(sum(em)), len(em))
