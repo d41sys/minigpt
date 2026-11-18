@@ -1,7 +1,8 @@
 """minigpt CLI: tokenizer, pretraining, classifier fine-tune, SFT, DPO, eval, generation.
 
 Pipeline: `pretrain` writes runs/pretrain/ckpt.pt; `finetune-cls` and `sft` start from it;
-`dpo` starts from runs/sft/ckpt.pt; `eval` reports on whatever checkpoints exist.
+`dpo` starts from runs/sft/ckpt.pt; `opd` distils runs/grpo/ckpt.pt into a smaller student;
+`eval` reports on whatever checkpoints exist.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ from minigpt.finetune_cls import (
     split_data,
     train_classifier,
 )
-from minigpt.model import GPTConfig, GPTModel
+from minigpt.model import GPTConfig, GPTModel, count_parameters
+from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
 from minigpt.sft import (
     SFTDataset,
@@ -75,6 +77,10 @@ TOKENIZER_PATH = Path("runs/tokenizer.json")
 PRETRAIN_CKPT = Path("runs/pretrain/ckpt.pt")
 SFT_CKPT = Path("runs/sft/ckpt.pt")
 DPO_CKPT = Path("runs/dpo/ckpt.pt")
+GRPO_CKPT = Path("runs/grpo/ckpt.pt")
+REASON_SFT_CKPT = Path("runs/reason_sft/ckpt.pt")
+OPD_CKPT = Path("runs/opd/ckpt.pt")
+OPD_OFF_POLICY_CKPT = Path("runs/opd/off_policy/ckpt.pt")
 SFT_HELDOUT = 100  # last N Alpaca rows are never trained on
 
 
@@ -377,6 +383,61 @@ def cmd_dpo(args: argparse.Namespace) -> None:
     print(f"checkpoint -> {out}")
 
 
+def cmd_opd(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    teacher_path = Path(args.teacher)
+    if not teacher_path.exists():
+        sys.exit(f"{teacher_path} not found: pass --teacher")
+    teacher = load_model(teacher_path)
+    if args.student_config:
+        d_model, num_layers, num_heads = (int(v) for v in args.student_config.split(","))
+        student = GPTModel(
+            GPTConfig(
+                vocab_size=teacher.config.vocab_size,
+                context_length=teacher.config.context_length,
+                d_model=d_model,
+                num_layers=num_layers,
+                num_heads=num_heads,
+            )
+        )
+    else:
+        student_path = Path(args.student)
+        if not student_path.exists():
+            sys.exit(f"{student_path} not found: pass --student or --student-config")
+        student = load_model(student_path)
+    mode = "off-policy SFT on teacher samples" if args.off_policy else f"on-policy {args.kl} KL"
+    print(f"device={device} {mode} teacher={args.teacher}")
+    n_student, n_teacher = count_parameters(student), count_parameters(teacher)
+    print(f"params: student {n_student:,}, teacher {n_teacher:,}")
+    res = train_opd(
+        student,
+        teacher,
+        steps=args.steps,
+        batch_size=args.batch_size,
+        group=args.group,
+        digits=args.digits,
+        max_new_tokens=args.max_new_tokens,
+        lr=args.lr,
+        kl=args.kl,
+        off_policy=args.off_policy,
+        temperature=args.temperature,
+        eval_every=args.eval_every,
+        eval_tasks=args.eval_tasks,
+        seed=args.seed,
+        device=device,
+    )
+    for row in res["history"]:
+        print(
+            f"step {int(row['step'])} train_loss {row['loss']:.4f} "
+            f"reverse_kl/token {row['kl']:.4f} greedy_acc {row['accuracy']:.3f} "
+            f"mean_len {row['mean_len']:.1f}"
+        )
+    out = Path(args.out or (OPD_OFF_POLICY_CKPT if args.off_policy else OPD_CKPT))
+    save_checkpoint(out, student, None, step=args.steps, val_loss=res["final_kl"])
+    print(f"checkpoint -> {out}")
+
+
 SHORT_ANSWER_MAX_WORDS = 5  # held-out rows with references this short form the EM set
 DEFAULT_EVAL_N = 50  # default `eval --n`; the paired table also reports F1 on these first rows
 
@@ -661,6 +722,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="reused if present, so runs differing only in beta train on identical pairs",
     )
     s.set_defaults(func=cmd_dpo)
+
+    s = sub.add_parser("opd", help="distil a teacher into a smaller student, on-policy")
+    s.add_argument("--teacher", default=str(GRPO_CKPT))
+    s.add_argument("--student", default=str(REASON_SFT_CKPT), help="student init checkpoint")
+    s.add_argument(
+        "--student-config",
+        default=None,
+        help="d_model,num_layers,num_heads: random-init student of this size instead of --student",
+    )
+    s.add_argument("--steps", type=int, default=100)
+    s.add_argument("--batch-size", type=int, default=8, help="tasks per step")
+    s.add_argument("--group", type=int, default=1, help="completions per task")
+    s.add_argument("--digits", type=int, default=3, help="operands have 1..digits digits")
+    s.add_argument("--max-new-tokens", type=int, default=64)
+    s.add_argument("--lr", type=float, default=3e-4)
+    s.add_argument(
+        "--kl",
+        choices=["reverse", "forward"],
+        default="reverse",
+        help="reverse is mode-seeking, forward is mode-covering",
+    )
+    s.add_argument(
+        "--off-policy",
+        action="store_true",
+        help="baseline: the teacher samples and the student does SFT on those samples",
+    )
+    s.add_argument("--temperature", type=float, default=1.0, help="sampler's; 0 = greedy")
+    s.add_argument("--eval-every", type=int, default=25)
+    s.add_argument("--eval-tasks", type=int, default=64)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default=None, help=f"default {OPD_CKPT} ({OPD_OFF_POLICY_CKPT} off)")
+    s.set_defaults(func=cmd_opd)
 
     s = sub.add_parser("eval", help="perplexity + EM + token F1 + judge (mock or Ollama), weighted")
     s.add_argument(

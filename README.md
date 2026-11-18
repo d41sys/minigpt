@@ -235,6 +235,16 @@ Pre-registered rule: adopt a variant only if, on every seed, its test loss is lo
 
 The default change affects only new runs. SFT, DPO, the spam classifier and the eval tables in this README were trained from the old aligned-window checkpoint (`runs/pretrain/ckpt.pt`, not overwritten) and are **not retrained**; a bare `minigpt pretrain` no longer reproduces that checkpoint (use `--sampling aligned`).
 
+## Post-training stages
+
+Small-scale copies of post-training stages that labs describe publicly, run on verifiable addition tasks ([`reason.py`](src/minigpt/reason.py)). The sources are cited for the stage's shape only; nothing here claims to reproduce their results. No stage has been run yet, so no results are reported.
+
+### On-policy distillation (OPD)
+
+The student samples its own completions and, at every completion token, minimises the full-vocabulary KL between its next-token distribution and a frozen teacher's on that same prefix ([`opd.py`](src/minigpt/opd.py)). Mirrors the last stage of [DeepSeek-V4.1](https://arxiv.org/html/2609.19969) (§5.2.4, full-vocabulary OPD); background: [MiniLLM](https://arxiv.org/abs/2306.08543) (Gu et al. 2024) and [Thinking Machines, "On-policy distillation"](https://thinkingmachines.ai/blog/on-policy-distillation/) (2025).
+Run: `minigpt opd` (teacher `runs/grpo/ckpt.pt`, student `runs/reason_sft/ckpt.pt` or `--student-config 64,2,4`; writes `runs/opd/ckpt.pt`). `--kl forward` swaps the direction; `--off-policy` is the baseline where the teacher samples and the student does plain SFT on those samples (`runs/opd/off_policy/ckpt.pt`).
+Lessons to test: reverse KL is mode-seeking (the student commits to one teacher mode) and forward KL is mode-covering; training on the student's own prefixes is meant to fix exposure bias, since an off-policy student never sees its own mistakes corrected. The history logs reverse KL per token, greedy accuracy and mean length on one fixed seeded task set for both modes.
+
 ## Design decisions
 
 - **Byte-level BPE with GPT-2 regex pre-tokenisation.** Byte-level means no unknown tokens and lossless round-trips (tested on CJK and emoji). The regex stops merges from crossing word and punctuation boundaries. When two pairs have the same count, the smallest pair id wins, so training is deterministic. Encoding memoises each chunk, so encoding the 1.1 MB corpus takes seconds.
