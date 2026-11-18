@@ -173,7 +173,7 @@ def generate_preference_pairs(
         instruction = record.get("instruction", "")
         input_text = record.get("input", "")
         chosen = record.get("output", "")
-        prompt_ids = tokenizer.encode(format_prompt(instruction, input_text), allow_special=True)
+        prompt_ids = tokenizer.encode(format_prompt(instruction, input_text))
         input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         with torch.no_grad():
             gen_ids = sft_model.generate(

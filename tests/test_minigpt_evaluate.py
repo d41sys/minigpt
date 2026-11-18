@@ -103,10 +103,8 @@ def _report(**kw: float) -> EvalReport:
         perplexity=32.0,
         vocab_size=1024,
         exact_match=0.2,
-        exact_match_n=10,
         token_f1=0.4,
         judge_mean=3.0,
-        open_n=50,
     )
     base.update(kw)
     return EvalReport(**base)  # type: ignore[arg-type]
