@@ -2,6 +2,9 @@ import math
 
 import pytest
 import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from minigpt.bpe import BPETokenizer
 from minigpt.dpo import (
@@ -12,7 +15,12 @@ from minigpt.dpo import (
     train_dpo,
 )
 from minigpt.evaluate import RougeLJudge, longest_common_subsequence
-from minigpt.finetune_cls import GPTForClassification, freeze_for_finetuning, split_data
+from minigpt.finetune_cls import (
+    GPTForClassification,
+    evaluate_classifier,
+    freeze_for_finetuning,
+    split_data,
+)
 from minigpt.model import GPTConfig, GPTModel
 from minigpt.sft import build_sft_example, format_prompt
 
@@ -83,12 +91,64 @@ def test_classifier_head_swap_and_freeze() -> None:
     assert logits.shape == (1, 2) and loss is not None
 
 
-def test_classifier_ignores_padding() -> None:
+@pytest.mark.parametrize("pos_encoding", ["learned", "rope"])
+def test_classifier_ignores_padding(pos_encoding: str) -> None:
     torch.manual_seed(0)
-    model = GPTForClassification(GPTModel(TINY), pad_id=0).eval()
+    gpt = GPTModel(GPTConfig(**{**TINY.__dict__, "pos_encoding": pos_encoding}))
+    model = GPTForClassification(gpt, pad_id=0).eval()
     a, _ = model(torch.tensor([[5, 6, 7, 0, 0]]))
     b, _ = model(torch.tensor([[5, 6, 7, 0, 0, 0, 0]]))
     assert torch.allclose(a, b, atol=1e-5)
+    # pooling must read the last real token: dropping the padding changes nothing, but changing
+    # the last real token (or reading the first token / the first pad) does.
+    c, _ = model(torch.tensor([[5, 6, 7]]))
+    d, _ = model(torch.tensor([[5, 6, 8, 0, 0]]))
+    assert torch.allclose(a, c, atol=1e-5)
+    assert not torch.allclose(a, d, atol=1e-5)
+
+
+class _FixedPreds(nn.Module):
+    """Stub classifier: row i predicts class x[i, 0]."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return F.one_hot(x[:, 0], 2).float(), None
+
+
+def test_evaluate_classifier_hand_computed_metrics() -> None:
+    # preds  1 1 1 1 0 0 / labels 1 1 0 0 1 0  ->  tp 2, fp 2, tn 1, fn 1
+    preds = torch.tensor([[1], [1], [1], [1], [0], [0]])
+    labels = torch.tensor([1, 1, 0, 0, 1, 0])
+    loader = DataLoader(TensorDataset(preds, labels), batch_size=4)  # counts span two batches
+    m = evaluate_classifier(_FixedPreds(), loader, torch.device("cpu"))
+    assert m["accuracy"] == pytest.approx(3 / 6)
+    assert m["precision"] == pytest.approx(2 / 4)
+    assert m["recall"] == pytest.approx(2 / 3)
+    assert m["f1"] == pytest.approx(4 / 7)
+    assert m["total"] == 6
+
+
+def test_evaluate_classifier_all_negative_predictions() -> None:
+    preds = torch.zeros(6, 1, dtype=torch.long)
+    labels = torch.tensor([1, 1, 0, 0, 1, 0])
+    loader = DataLoader(TensorDataset(preds, labels), batch_size=6)
+    m = evaluate_classifier(_FixedPreds(), loader, torch.device("cpu"))
+    assert (m["precision"], m["recall"], m["f1"]) == (0.0, 0.0, 0.0)
+    assert m["accuracy"] == pytest.approx(3 / 6)
+
+
+def test_sequence_log_probs_match_masked_cross_entropy() -> None:
+    torch.manual_seed(0)
+    model = GPTModel(TINY).eval()
+    x = torch.randint(0, 300, (3, 20))
+    y = torch.randint(0, 300, (3, 20))
+    y[:, :7] = -100  # masked prompt
+    y[1, 15:] = -100  # ragged tail
+    y[2, :] = -100  # fully masked row sums to 0
+    got = compute_sequence_log_probs(model, x, y)
+    logits, _ = model(x)
+    expected = -F.cross_entropy(logits.transpose(1, 2), y, ignore_index=-100, reduction="none")
+    assert torch.allclose(got, expected.sum(-1), atol=1e-5)
+    assert got[2].item() == 0.0
 
 
 def test_split_ratios() -> None:

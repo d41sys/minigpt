@@ -5,12 +5,17 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
+import torch.nn.functional as F
+from torch import nn
 
 from minigpt import evaluate
+from minigpt.cli import paired_f1_table
 from minigpt.evaluate import (
     EvalReport,
     MockJudge,
     OllamaJudge,
+    compute_perplexity,
     exact_match,
     holm_adjust,
     normalize_answer,
@@ -146,3 +151,52 @@ def test_wilson_interval_hand_computed() -> None:
     assert wilson_interval(0, 12) == pytest.approx((0.0, 0.24249), abs=1e-4)
     lo, hi = wilson_interval(50, 100)
     assert lo == pytest.approx(1 - hi) and lo == pytest.approx(0.4038, abs=1e-4)
+
+
+class _CopyInput(nn.Module):
+    """Stub LM: logit 10 on the input token, so loss is ~0 iff target == input."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return F.one_hot(x, 20).float() * 10, None
+
+
+def test_compute_perplexity_is_token_mean_over_uneven_batches() -> None:
+    torch.manual_seed(0)
+    x = torch.randint(0, 20, (2, 4, 8))
+    y = x.clone()  # batch 0: near-zero loss, 4 active tokens
+    y[0, :, 1:] = -100
+    y[1] = (x[1] + 1) % 20  # batch 1: loss ~10 per token, 28 active tokens
+    y[1, 0, 4:] = -100
+    batches = [(x[0], y[0]), (x[1], y[1])]
+    cpu = torch.device("cpu")
+    logits = torch.cat([_CopyInput()(b)[0].view(-1, 20) for b, _ in batches])
+    targets = torch.cat([t.view(-1) for _, t in batches])
+    expected = math.exp(F.cross_entropy(logits, targets, ignore_index=-100).item())
+    got = compute_perplexity(_CopyInput(), batches, cpu)
+    assert got == pytest.approx(expected, rel=1e-5)
+    # a mean of per-batch means would land near exp(5), far from the token mean
+    first = math.exp(F.cross_entropy(logits[:32], targets[:32], ignore_index=-100).item())
+    got_first = compute_perplexity(_CopyInput(), batches, cpu, max_batches=1)
+    assert got_first == pytest.approx(first, rel=1e-5)
+    assert got_first < expected / 10
+
+
+def test_paired_f1_table_verdicts() -> None:
+    base = np.linspace(0.2, 0.6, 60)
+    sign = np.where(np.arange(60) % 2 == 0, 1.0, -1.0)
+    f1_by_name = {
+        "base": base.tolist(),
+        "better": (base + 0.2 + 0.02 * sign).tolist(),
+        "worse": (base - 0.2 + 0.02 * sign).tolist(),
+        "noisy": (base + 0.3 * sign).tolist(),  # mean diff exactly 0
+    }
+    rows = {r["model"]: r for r in paired_f1_table(f1_by_name, "base", n_boot=500)}
+    assert set(rows) == {"better", "worse", "noisy"}
+    assert rows["better"]["verdict"] == "different (better)"
+    assert rows["worse"]["verdict"] == "different (worse)"
+    assert rows["noisy"]["verdict"] == "no detectable difference"
+    # f1_first averages only the first DEFAULT_EVAL_N rows, f1 all of them
+    better = f1_by_name["better"]
+    assert rows["better"]["f1_first"] == pytest.approx(float(np.mean(better[:50])))
+    assert rows["better"]["f1"] == pytest.approx(float(np.mean(better)))
+    assert rows["better"]["f1_first"] != pytest.approx(rows["better"]["f1"])

@@ -35,12 +35,7 @@ class GPTForClassification(nn.Module):
     def forward(
         self, idx: torch.Tensor, targets: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        _, t = idx.size()
-        pos = torch.arange(0, t, dtype=torch.long, device=idx.device)
-        x = self.gpt.drop(self.gpt.wte(idx) + self.gpt.wpe(pos))
-        for block in self.gpt.blocks:
-            x = block(x)
-        x = self.gpt.ln_f(x)
+        x = self.gpt.hidden_states(idx)
         # Right-padded inputs: causal attention means the last real token has seen
         # the whole message and none of the padding.
         last = ((idx != self.pad_id).sum(dim=1) - 1).clamp(min=0)

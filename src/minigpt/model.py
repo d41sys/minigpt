@@ -211,23 +211,10 @@ class GPTModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(
-        self,
-        idx: torch.Tensor,
-        targets: torch.Tensor | None = None,
-        cache: list[LayerCache] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward pass.
-
-        Args:
-            idx: Tensor of token IDs with shape (B, T)
-            targets: Optional ground-truth token IDs with shape (B, T)
-            cache: Optional per-layer KV cache (see `generate`). `idx` then holds only the
-                new tokens, positioned right after the cached ones; the cache is extended in place.
-
-        Returns:
-            Tuple of (logits, loss). If targets is None, loss is None.
-        """
+    def hidden_states(
+        self, idx: torch.Tensor, cache: list[LayerCache] | None = None
+    ) -> torch.Tensor:
+        """Embeddings, blocks and final LayerNorm: (B, T) token IDs -> (B, T, d_model)."""
         device = idx.device
         _b, t = idx.size()
         start = cache[0]["k"].size(2) if cache and cache[0] else 0
@@ -245,7 +232,27 @@ class GPTModel(nn.Module):
         for i, block in enumerate(self.blocks):
             x = block(x, cache[i] if cache is not None else None)
 
-        x = self.ln_f(x)
+        out: torch.Tensor = self.ln_f(x)
+        return out
+
+    def forward(
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        cache: list[LayerCache] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Forward pass.
+
+        Args:
+            idx: Tensor of token IDs with shape (B, T)
+            targets: Optional ground-truth token IDs with shape (B, T)
+            cache: Optional per-layer KV cache (see `generate`). `idx` then holds only the
+                new tokens, positioned right after the cached ones; the cache is extended in place.
+
+        Returns:
+            Tuple of (logits, loss). If targets is None, loss is None.
+        """
+        x = self.hidden_states(idx, cache)
         logits = self.lm_head(x)
 
         loss: torch.Tensor | None = None
