@@ -82,7 +82,7 @@ Published tokenizer stats and every result below predate the fix that stopped th
 | SFT, Alpaca 900 rows × 3 epochs | train loss | 4.286 → 3.453 |
 | DPO, 300 pairs, β=0.1, 2 epochs | loss at step 1 / epoch 2 mean | 0.6931 (= log 2) / 0.2427; reward accuracy 0.940 |
 | GPT-2 124M parity (network test) | greedy 10 tokens vs HF `transformers` | identical (test passes) |
-| Unit tests | `pytest` | 90 passed, 1 deselected (network) in 9 s on CI |
+| Unit tests | `pytest` | 102 passed, 1 deselected (network) in 8 s on CI |
 
 ### Evaluation pipeline
 
@@ -263,6 +263,12 @@ uv run minigpt cai-eval   # judge scores held-out prompts 1-5: sft vs cai_sl vs 
 ```
 
 - **Lesson to test:** the labels are only as good as the judge reading a text file; `runs/cai/pairs_stats.json` shows how often it just picked the slot shown first.
+
+### RLHF: reward model + PPO
+
+Classic RLHF ([`rlhf.py`](src/minigpt/rlhf.py)): a program stands in for the human labeler (answer correct + format correct) and ranks `k` SFT samples per prompt; a Bradley-Terry reward model (SFT body + scalar head on the last non-pad token, 20% of pairs held out) is fit to the pairs; PPO then maximises its score with GAE (γ=1, λ=0.95), clipped policy and value losses, a per-token KL penalty to the SFT policy and a value head on the policy. Mirrors [InstructGPT](https://arxiv.org/abs/2203.02155) (Ouyang et al. 2022), the recipe DPO and GRPO later replaced; the Claude Opus 5.5 system card describes crowd workers doing preference selection, which the labeler program replaces here.
+Run: `minigpt reward-model` (reads `runs/reason_sft/ckpt.pt`, prints held-out pairwise accuracy, writes `runs/rm/ckpt.pt`), then `minigpt ppo` (writes `runs/ppo/ckpt.pt` and `runs/ppo/history.json`; `--sft` on both points at another policy checkpoint).
+Lesson to test ([Gao et al. 2022](https://arxiv.org/abs/2210.10760), reward-model overoptimization): the exact checker is a gold reward, so the history logs the proxy (reward-model) score next to gold accuracy, KL, value loss and length at every step. Overoptimization would show as the proxy still rising while gold accuracy falls from its peak; `minigpt ppo` prints both so a run can show it or not. The Claude Opus 5.5 card reports training snapshots that "concealed actions from an automated grader"; here the grader is learned and any exploit would live in the reward model.
 
 ## Design decisions
 
