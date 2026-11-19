@@ -339,6 +339,43 @@ Multi-teacher OPD, `+` teacher `runs/grpo`, `-` teacher `runs/sub_grpo`, 1000 st
 
 Both modes cut the held-out KL by more than half and raised greedy accuracy on the OPD held-out set (0.230 → 0.330 on-policy, → 0.405 off-policy), in both operators, mostly at 1 digit; 2-3 digits stay far below the teachers. On this seed and these 200 tasks the two modes are not distinguishable on overall accuracy, and off-policy was ahead on `-` at 2-3 digits (0.44 / 0.12 vs 0.20 / 0.00), so this run does not show an on-policy advantage. The 1000-step runs shared the GPU (run concurrently, 13 min each; a 300-step run alone took 7.2 min on-policy and 6.2 min off-policy). 300-step runs (64 held-out tasks, noisier): KL 0.692 → 0.465 on-policy, → 0.504 off-policy; accuracy 0.188 → 0.219 and → 0.328.
 
+### Other labs' published recipes
+
+Toy copies of recipes other labs published, run on the Korea server (RTX 4090, CUDA). Each one starts from a medium addition base, `reason-sft --n 10000 --epochs 3`, which scores 0.68 / 0.62 / 0.30 greedy on 1 / 2 / 3 digits. The strong base saturates at 1.00 and the 500-trace base learns nothing, so neither can separate recipes. The shared baseline is default `grpo` for 200 steps at seeds 0/1/2: 1.00 / 0.93 / 0.75. Every recipe except R1-Zero ran at seeds 0 and 1. A verdict other than "no measurable difference" needs both seeds on the same side of the baseline by more than 0.07 (50 tasks per digit count). Each row bundles the lab's recipe as published; none is an ablation of one idea. The flags, sources and full tables are in [`docs/recipes/`](docs/recipes/).
+
+The policy-loss variants (GSPO through ProRL, except RLOO) run with `--mu 4`, four optimizer steps per batch, because a clip only fires once the policy has moved from the sampling policy. They are judged against a GRPO `mu 4` run, not the `mu 1` shared baseline. RLOO runs at `mu 1` and is judged against the shared baseline.
+
+| Lab (recipe) | What changes | Greedy accuracy (2-seed mean on 1 / 2 / 3 digits, unless per-seed is stated) | Verdict |
+|---|---|---|---|
+| GRPO `mu 4` (baseline for the loss variants) | 4 optimizer steps per batch | 1.00 / 0.89 / 0.64 | loses weakly to `mu 1` at 3 digits (gap 0.11) |
+| Qwen (GSPO) | sequence-level importance ratio and clip | 0.97 / 0.95 / 0.66 | no measurable difference |
+| MiniMax (CISPO) | clipped IS weight kept as a gradient scale, no KL | 0.77 / 0.56 / 0.22 | loses |
+| ByteDance Seed (DAPO) | clip-higher, token-level loss, dynamic sampling, no KL | 0.99 / 0.84 / 0.51 | loses at 3 digits |
+| Mistral (Magistral) | no KL, clip-higher, group-length normalisation, batch-std advantage | 0.92 / 0.87 / 0.48 | loses at 3 digits |
+| RLOO (also Kimi K1.5) | leave-one-out baseline, no std, no clip | 0.95 / 0.89 / 0.77 | no measurable difference |
+| NVIDIA (ProRL) | reset the KL reference and optimizer every 50 steps | 1.00 / 0.84 / 0.60 | no measurable difference |
+| Meta (Llama 3) | 3 rounds of rejection sampling → SFT → DPO | 3 digits, seed 0 / 1: 0.88 / 0.88 | beats GRPO, about 1.5 standard errors; the gain comes from rejection sampling, DPO adds nothing measurable |
+| AI2 (Tülu 3 / OLMo 3) | DPO, then RL with verifiable rewards | 3 digits, seed 0 / 1: 0.74 / 0.64 | no measurable difference |
+| DeepSeek (R1-Zero) | RL from the pretrained model, no SFT | 0 (seed 0 only) | fails: no `<think>`, so every group has equal reward and gives no gradient |
+| DeepSeek (R1) | rejection-sampling SFT, then GRPO | 3 digits, seed 0 / 1: 0.76 / 0.70 | no measurable difference |
+| Microsoft (Phi-4-reasoning) | SFT on traces from the RL teacher, then short GRPO | 3 digits, seed 0 / 1: 0.88 / 0.98 | beats GRPO, almost all from distilling an already RL-trained teacher |
+| Rejection-sampling selector | exact verifier vs learned reward model | 3 digits, seed 0 / 1: 0.50 / 0.66 vs 0.24 / 0.30 | verifier wins; the RM picked worse than random |
+| Moonshot (Kimi K3 budget) | reward −1 above τ × the base model's mean think length (b0) | τ 1.25: 1.00 / 0.97 / 0.75; annealed to 1.0: 0.59 / 0.67 / 0.21; annealed to 0.8: 0.76 / 0.61 / 0.30 | τ 1.25 no measurable difference; annealing loses. On the effort base, think drops to 0 and 2-digit accuracy to 0.10–0.14 |
+| Moonshot (Kimi K1.5) | group-relative length reward | 0.99 / 0.90 / 0.67 | no measurable difference |
+| ByteDance Seed (DAPO overlong) | soft penalty over the last L tokens before the 80-token cap | L = 20: 0.99 / 0.88 / 0.78; L = 40: seed 0 fell to 0.00 at 3 digits, seed 1 0.82 | L = 20 no measurable difference; L = 40 unstable |
+
+What this testbed shows: the 3 recipes that drop the KL term (CISPO, DAPO, Magistral) are the 3 that lose to GRPO `mu 4`, with 1.6 to 4.6 times its KL, but no run isolates KL, so the cause is inference. Gains came only from better data before RL: rejection-sampling rounds or a distilled teacher. No length recipe shortened thinking without losing accuracy; the likely reason (not tested) is that the column traces are already minimal at 7.5 / 16.0 / 24.8 think tokens for 1 / 2 / 3 digits. Skipped as infrastructure-only: async or partial rollouts, quantization-aware training, agent harnesses and generative reward-model tournaments.
+
+Consolidation recipes merge the `+` teacher (`runs/grpo`) and the `-` teacher (`runs/sub_grpo`) into the weak mixed-operator student (`runs/student_sft`: `+` 0.20 / 0.08 / 0.00, `-` 0.42 / 0.06 / 0.00). Distillation runs take 500–1000 steps. Details are in [`docs/recipes/consolidation.md`](docs/recipes/consolidation.md).
+
+| Lab (recipe) | Toy version | `+` / `-` accuracy at 1 digit, seed 0 / 1 | Verdict |
+|---|---|---|---|
+| Moonshot (Kimi K3, distillation as RL) | `opd --estimator token`: per-token log-ratio reward instead of full-vocabulary reverse KL | lr 3e-4: diverges on both seeds (KL 0.66 → 1.2–1.5, accuracy 0); lr 1e-4: KL 0.60–0.65 vs 0.34–0.42 for full | token estimator worse here |
+| Microsoft (MAI-Thinking-1) | off-policy trace distillation (1000 steps), then GRPO 200 steps | `+` 0.92 / 0.96 vs 0.50 / 0.60, `-` 0.90 / 1.00 vs 0.32 / 0.32 for GRPO alone | beats RL alone, with 1000 more steps of distillation |
+| NVIDIA (Nemotron 3 Ultra) | round 2 of multi-teacher distillation with GRPO-refreshed teachers | `+` 0.72 vs 0.82, `-` 0.74 vs 0.84 for more round-1 steps (seed 0 only) | no measurable difference |
+| Zhipu (GLM-5) | GRPO `+`, then GRPO `-`, then distil toward both stage checkpoints | stage 2 drops `+` 0.84 → 0.46; full distil `+` 0.56 / 0.36; token distil `+` 0.72 / 0.72 but `-` 0.48 / 0.44 | full does not recover the forgotten skill; token partly does, but its lr differs, so tentative |
+| Qwen (Qwen3 strong-to-weak) | 125k-param random-init student: off-policy, then on-policy distillation | on-policy and more off-policy both end at KL about 0.95, accuracy near 0 at 2–3 digits (seed 0 only) | no measurable difference |
+
 ## Design decisions
 
 - **Byte-level BPE with GPT-2 regex pre-tokenisation.** Byte-level means no unknown tokens and lossless round-trips (tested on CJK and emoji). The regex stops merges from crossing word and punctuation boundaries. When two pairs have the same count, the smallest pair id wins, so training is deterministic. Encoding memoises each chunk, so encoding the 1.1 MB corpus takes seconds.
