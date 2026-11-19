@@ -193,6 +193,7 @@ def train_grpo(
     max_rounds: int = 4,
     efforts: tuple[int, ...] = (),
     effort_k0: float = 0.5,
+    shape: GroupShaper | None = None,
     reward_fn: RewardFn = default_reward,
     ops: Sequence[str] = "+",
     observe: Callable[[Samples], dict[str, float]] | None = None,
@@ -214,6 +215,10 @@ def train_grpo(
     `length_penalty(., effort_coef(b, efforts, effort_k0))`, `tasks_per_step` still counts tasks
     (so `tasks_per_step * len(efforts)` groups), and the record adds `think_e{b}` (mean think
     tokens) and `acc_e{b}` per level.
+
+    `shape` is a group-level reward hook (`make_shaper`: Kimi K1.5 length reward, DAPO overlong
+    penalty, Kimi K3 budget override). It sees each group's completions and rewards, after the
+    effort penalty, and returns the rewards the advantages are computed from.
     """
     levels: tuple[int | None, ...] = efforts or (None,)
     prefix_len = max(len(effort_prefix(b)) for b in levels)
@@ -245,12 +250,13 @@ def train_grpo(
             prompts += new_prompts
             groups += new_groups
             texts += [[decode_completion(tok, c) for c in g] for g in new_groups]
-            rewards = torch.tensor(
-                [
-                    [reward_fn(t, s) + (0.0 if b is None else length_penalty(s, ks[b])) for s in g]
-                    for (t, b), g in zip(entries, texts, strict=True)
-                ]
-            )
+            rows: list[list[float]] = []
+            for (t, b), g in zip(entries, texts, strict=True):
+                row = [reward_fn(t, s) for s in g]
+                if b is not None:
+                    row = [r + length_penalty(s, ks[b]) for r, s in zip(row, g, strict=True)]
+                rows.append(shape(step, t, b, g, row) if shape else row)
+            rewards = torch.tensor(rows)
             # All-equal rewards give zero advantage: nothing to learn, so drop the group.
             spread = rewards.max(dim=1).values > rewards.min(dim=1).values
             kept = spread.nonzero().flatten().tolist()
@@ -297,3 +303,103 @@ def train_grpo(
         if on_step is not None:
             on_step(record)
     return {"history": history}
+
+
+# --- Length-control reward shaping (Kimi K1.5, Kimi K3, DAPO). Off unless a shaper is passed. ---
+
+# (step, task, effort level or None, completions of one group, their rewards) -> new rewards
+GroupShaper = Callable[[int, Task, int | None, list[str], list[float]], list[float]]
+Budgets = dict[tuple[int | None, int], float]  # (effort, digits) -> b0, mean think tokens
+
+
+def kimi_length_rewards(correct: Sequence[bool], lens: Sequence[int]) -> list[float]:
+    """Kimi K1.5 section 2.3.3: lambda = 0.5 - (len - min) / (max - min); correct get lambda,
+    wrong get min(0, lambda); all zero when the group has one length."""
+    lo, hi = min(lens), max(lens)
+    if hi == lo:
+        return [0.0] * len(lens)
+    lams = [0.5 - (n - lo) / (hi - lo) for n in lens]
+    return [lam if ok else min(0.0, lam) for lam, ok in zip(lams, correct, strict=True)]
+
+
+def overlong_penalty(length: int, l_max: int, l_cache: int) -> float:
+    """DAPO section 3.4, eq. 13: 0 up to l_max - l_cache, linear down to -1 at l_max, -1 beyond."""
+    if length <= l_max - l_cache:
+        return 0.0
+    return max(-1.0, (l_max - l_cache - length) / l_cache)
+
+
+def budget_override(rewards: Sequence[float], lens: Sequence[int], limit: float) -> list[float]:
+    """Kimi K3 reasoning-effort RL: reward -1 for every trajectory longer than `limit`, correct
+    or not."""
+    return [-1.0 if n > limit else r for r, n in zip(rewards, lens, strict=True)]
+
+
+def budget_tau(step: int, steps: int, taus: Sequence[float]) -> float:
+    """Stage-wise multiplier: `steps` split into len(taus) equal stages, one tau each."""
+    return taus[min(len(taus) - 1, step * len(taus) // max(1, steps))]
+
+
+@torch.no_grad()
+def estimate_budgets(
+    model: GPTModel,
+    tok: BPETokenizer,
+    digits: tuple[int, int],
+    efforts: tuple[int, ...],
+    ops: Sequence[str],
+    n_tasks: int,
+    group_size: int,
+    max_new_tokens: int,
+    temperature: float,
+    seed: int,
+) -> Budgets:
+    """b0 per (effort, digit count) = mean think tokens of the cold-start `model`'s samples.
+
+    Kimi K3 has one budget per problem; one per difficulty bucket is the cheap reading here
+    (a per-problem budget would double the rollouts).
+    """
+    rng, eos = random.Random(seed), tok.eos_token_id
+    out: Budgets = {}
+    for b in efforts or (None,):
+        for d in range(digits[0], digits[1] + 1):
+            lens = []
+            for _ in range(n_tasks):
+                prompt = tok.encode(effort_prefix(b) + sample_task(rng, d, ops).prompt)
+                for c in sample_group(model, prompt, group_size, max_new_tokens, eos, temperature):
+                    lens.append(think_tokens(decode_completion(tok, c)))
+            out[b, d] = sum(lens) / len(lens)
+    return out
+
+
+def make_shaper(
+    steps: int,
+    max_new_tokens: int,
+    budgets: Budgets | None = None,
+    taus: Sequence[float] = (1.0,),
+    length_weight: float = 0.0,
+    length_warmup: int = 0,
+    overlong_cache: int = 0,
+) -> GroupShaper:
+    """Compose the three shapings (each off at its default) into one group-level reward hook.
+
+    Order: K1.5 length reward (weight `length_weight`, from step `length_warmup` on) and DAPO
+    soft overlong penalty (`overlong_cache` > 0, l_max = `max_new_tokens`) are added; the K3
+    budget override (`budgets` given, limit tau(step) * b0) then wins.
+    """
+
+    def shape(
+        step: int, task: Task, effort: int | None, texts: list[str], rewards: list[float]
+    ) -> list[float]:
+        lens = [len(s) for s in texts]
+        if length_weight and step >= length_warmup:
+            extra = kimi_length_rewards([accuracy_reward(task, s) == 1.0 for s in texts], lens)
+            rewards = [r + length_weight * x for r, x in zip(rewards, extra, strict=True)]
+        if overlong_cache:
+            pen = [overlong_penalty(n, max_new_tokens, overlong_cache) for n in lens]
+            rewards = [r + p for r, p in zip(rewards, pen, strict=True)]
+        if budgets is not None:
+            limit = budget_tau(step, steps, taus) * budgets[effort, len(str(task.a))]
+            rewards = budget_override(rewards, [think_tokens(s) for s in texts], limit)
+        return rewards
+
+    return shape
