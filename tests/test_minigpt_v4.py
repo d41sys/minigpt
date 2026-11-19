@@ -16,6 +16,7 @@ from minigpt.model import (
     sinkhorn,
 )
 from minigpt.reason import per_token_log_probs
+from minigpt.train import configure_optimizers
 
 BASE: dict[str, Any] = dict(
     vocab_size=64, context_length=16, d_model=32, num_layers=2, num_heads=4, d_ff=64
@@ -220,3 +221,27 @@ def test_v4_model_works_with_post_training_helpers() -> None:
         assert model(x)[0].shape == (2, 8, 64)  # MTP never leaks into the logits
         assert model.generate(x, 3).shape == (2, 11)
     assert set(v4(x, y)[1].shape) == set()  # scalar loss
+
+
+def test_v4_params_split_between_muon_and_adamw_and_one_step_runs() -> None:
+    torch.manual_seed(0)
+    model = GPTModel(cfg(**MOE, **HC))
+    opt = configure_optimizers(model, learning_rate=1e-2, optim="muon")
+    names = {id(p): n for n, p in model.named_parameters()}
+    muon = {names[id(p)] for g in opt.inner["muon"].param_groups for p in g["params"]}
+    adamw = {names[id(p)] for g in opt.inner["adamw"].param_groups for p in g["params"]}
+    experts = {n for n in names.values() if ".experts." in n and n.endswith("weight")}
+    assert experts and experts <= muon
+    assert not any("router" in n or "hc_" in n for n in muon)
+    assert any("router" in n for n in adamw) and any("hc_" in n for n in adamw)
+    assert "route_bias" not in "".join(names.values())  # the bias is a buffer: no optimizer
+
+    probe = "blocks.0.mlp.experts.0.c_fc.weight"
+    before = dict(model.named_parameters())[probe].detach().clone()
+    x = torch.randint(0, 64, (4, 8))
+    _, loss = model(x, targets=x)
+    assert loss is not None
+    loss.backward()
+    opt.step()
+    assert all(p.isfinite().all() for p in model.parameters())
+    assert not torch.equal(dict(model.named_parameters())[probe], before)

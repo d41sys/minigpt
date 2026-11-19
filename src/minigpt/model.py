@@ -187,7 +187,8 @@ class Compressor(nn.Module):
         blocks = x[:, : t // self.m * self.m].reshape(b, -1, self.m, d)
         bias = self.pos.view(self.m, -1)
         weights = torch.softmax(self.z(blocks) + bias, dim=2)
-        return (weights * self.kv(blocks)).sum(dim=2)  # (B, T // m, dim)
+        pooled: torch.Tensor = (weights * self.kv(blocks)).sum(dim=2)  # (B, T // m, dim)
+        return pooled
 
 
 class CompressedSparseAttention(CausalSelfAttention):
@@ -291,6 +292,8 @@ class MoEFeedForward(nn.Module):
     balance loss is left in `balance_loss` for `GPTModel` to add. Experts are looped over,
     which is fine for a handful of toy experts.
     """
+
+    route_bias: torch.Tensor  # buffer
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
@@ -409,7 +412,8 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, cache: LayerCache | None = None) -> torch.Tensor:
         if self.hc_attn is not None and self.hc_mlp is not None:
             x = self.hc_attn(x, lambda h: self.attn(self.ln_1(h), cache))
-            return self.hc_mlp(x, lambda h: self.mlp(self.ln_2(h)))
+            out: torch.Tensor = self.hc_mlp(x, lambda h: self.mlp(self.ln_2(h)))
+            return out
         x = x + self.attn(self.ln_1(x), cache)
         x = x + self.mlp(self.ln_2(x))
         return x

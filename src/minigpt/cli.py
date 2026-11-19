@@ -297,6 +297,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         device=device,
         grad_accum_steps=args.grad_accum,
         bf16=args.bf16,
+        optim=args.optim,
     )
     for row in res["history"]:
         print(
@@ -414,6 +415,7 @@ def cmd_sft(args: argparse.Namespace) -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        optim=args.optim,
         device=device,
     )
     for row in res["history"]:
@@ -476,6 +478,16 @@ def parse_ops(text: str) -> tuple[str, ...]:
 
 def add_ops_arg(s: argparse.ArgumentParser) -> None:
     s.add_argument("--ops", type=parse_ops, default=("+",), help="operators to use, e.g. + or +,-")
+
+
+def add_optim_arg(s: argparse.ArgumentParser) -> None:
+    s.add_argument(
+        "--optimizer",
+        dest="optim",
+        choices=["adamw", "muon"],
+        default="adamw",
+        help="muon: Muon on hidden 2-D weights, AdamW on the rest (DeepSeek-V4 report 2.4)",
+    )
 
 
 def load_teachers(specs: list[str], ops: tuple[str, ...]) -> dict[str, GPTModel]:
@@ -541,6 +553,7 @@ def cmd_opd(args: argparse.Namespace) -> None:
         ops=args.ops,
         estimator=args.estimator,
         r_max=args.r_max,
+        optim=args.optim,
     )
     for row in res["history"]:
         line = (
@@ -1027,6 +1040,7 @@ def cmd_reason_pretrain(args: argparse.Namespace) -> None:
         max_steps=args.steps,
         warmup_steps=max(1, args.steps // 20),
         learning_rate=args.lr,
+        optim=args.optim,
         eval_interval=args.eval_interval,
         checkpoint_dir=Path("runs") / args.name,
         device=device,
@@ -1051,6 +1065,7 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        optim=args.optim,
         device=device,
     )
     for row in res["history"]:
@@ -1149,6 +1164,7 @@ def run_grpo(
         clip_eps_high=args.clip_eps_high,
         advantage=args.advantage,
         ref_reset_every=args.ref_reset_every,
+        optim=args.optim,
         observe=observe,
         on_step=log,
         seed=args.seed,
@@ -1281,6 +1297,7 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         help="every N steps set the KL reference to the current policy and reset the "
         "optimizer (ProRL); 0 = never",
     )
+    add_optim_arg(s)
     add_ops_arg(s)
     s.add_argument("--out", default=str(out))
 
@@ -1438,6 +1455,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--bf16", action="store_true", help="bf16 autocast for forward and loss")
     add_arch_args(s)
+    add_optim_arg(s)
     s.set_defaults(func=cmd_pretrain)
 
     s = sub.add_parser("pretrain-eval", help="val-half and test-half loss of a checkpoint")
@@ -1465,6 +1483,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lr", type=float, default=3e-4)
     s.add_argument("--batch-size", type=int, default=8)
     s.add_argument("--seed", type=int, default=0)
+    add_optim_arg(s)
     s.set_defaults(func=cmd_sft)
 
     s = sub.add_parser("dpo", help="DPO on SFT-generated preference pairs")
@@ -1531,6 +1550,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--r-max", type=float, default=5.0, help="--estimator token: reward clip")
     s.add_argument("--out", default=None, help=f"default {OPD_CKPT} ({OPD_OFF_POLICY_CKPT} off)")
+    add_optim_arg(s)
     s.set_defaults(func=cmd_opd)
 
     s = sub.add_parser("cai-data", help="Constitutional AI data: SL revisions or RLAIF pairs")
@@ -1637,6 +1657,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     add_ops_arg(s)
     add_arch_args(s)
+    add_optim_arg(s)
     s.set_defaults(func=cmd_reason_pretrain)
 
     s = sub.add_parser("reason-sft", help="cold-start SFT on reference chain-of-thought traces")
@@ -1661,6 +1682,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     add_ops_arg(s)
     s.add_argument("--out", default=str(REASON_SFT_CKPT))
+    add_optim_arg(s)
     s.set_defaults(func=cmd_reason_sft)
 
     s = sub.add_parser("reason-eval", help="greedy accuracy / format / length, 1-5 digits")
