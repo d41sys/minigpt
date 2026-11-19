@@ -119,8 +119,9 @@ def configure_optimizers(
 
     AdamW applies weight decay to 2D matrix weights (embeddings, linear layers) and excludes 1D
     biases and layer normalizations. With Muon (DeepSeek-V4 report section 2.4) every 2D weight
-    outside the embeddings and the heads (any parameter named `*head*`) moves to Muon; those
-    stay on AdamW with everything 1D. Muon reuses `weight_decay` and `learning_rate`.
+    outside the embeddings and any parameter named `*head*`, `*router*` or `*hc_*` (LM and value
+    heads, MoE gate, mHC) moves to Muon; the rest stays on AdamW with everything 1D. Muon reuses
+    `weight_decay` and `learning_rate`.
     """
     if optim not in ("adamw", "muon"):
         raise ValueError(f"unknown optimizer {optim!r}: expected 'adamw' or 'muon'")
@@ -134,7 +135,8 @@ def configure_optimizers(
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        hidden = param.dim() == 2 and id(param) not in embeddings and "head" not in name
+        hidden = param.dim() == 2 and id(param) not in embeddings
+        hidden = hidden and not any(key in name for key in ("head", "router", "hc_"))
         if optim == "muon" and hidden:
             muon_params.append(param)
         elif param.dim() >= 2:

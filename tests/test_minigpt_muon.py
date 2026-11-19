@@ -50,6 +50,22 @@ def test_grouping_puts_hidden_matrices_on_muon() -> None:
     assert model.lm_head.weight is model.wte.weight  # the tied head is the embedding: AdamW
 
 
+def test_router_and_hc_params_stay_on_adamw() -> None:
+    class Toy(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.experts = torch.nn.ModuleList([torch.nn.Linear(4, 4) for _ in range(2)])
+            self.router = torch.nn.Linear(4, 2, bias=False)
+            self.hc_mix = torch.nn.Parameter(torch.zeros(4, 4))
+            self.balance_bias = torch.nn.Parameter(torch.zeros(2))
+
+    model = Toy()
+    opt = configure_optimizers(model, optim="muon")
+    assert isinstance(opt, MuonAdamW)
+    muon = [p for g in opt.inner["muon"].param_groups for p in g["params"]]
+    assert {id(p) for p in muon} == {id(e.weight) for e in model.experts}
+
+
 def test_default_is_plain_adamw() -> None:
     assert type(configure_optimizers(GPTModel(TINY))) is AdamW
     with pytest.raises(ValueError, match="unknown optimizer"):
