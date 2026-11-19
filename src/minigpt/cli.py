@@ -227,6 +227,32 @@ def format_half_losses(losses: dict[str, list[float]]) -> str:
     return "  ".join(parts)
 
 
+# GPTConfig fields exposed as `--kebab-case` flags (DeepSeek-V4 options, all off by default).
+ARCH_FIELDS = (
+    "n_experts",
+    "n_shared_experts",
+    "moe_top_k",
+    "mtp_depth",
+    "mtp_weight",
+    "hc_streams",
+    "attn_type",
+    "csa_block",
+    "csa_topk",
+    "csa_window",
+)
+
+
+def add_arch_args(s: argparse.ArgumentParser) -> None:
+    for name in ARCH_FIELDS:
+        default = getattr(GPTConfig, name)
+        s.add_argument("--" + name.replace("_", "-"), type=type(default), default=default)
+    s.add_argument("--moe-dense-first", action="store_true", help="keep layer 0 dense")
+
+
+def arch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {**{f: getattr(args, f) for f in ARCH_FIELDS}, "moe_dense_first": args.moe_dense_first}
+
+
 def cmd_pretrain(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
@@ -246,9 +272,12 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         dropout=args.dropout,
         pos_encoding=args.pos_encoding,
         use_sdpa=True,
+        **arch_kwargs(args),
     )
     model = GPTModel(cfg)
     print(f"params={sum(p.numel() for p in model.parameters()):,}")
+    if cfg.n_experts:
+        print(f"active params={count_parameters(model, active=True):,}")
     stride = 1 if args.sampling == "random" else None
     train_loader = create_dataloader(
         train_ids, cfg.context_length, args.batch_size, stride=stride, shuffle=True
@@ -991,10 +1020,13 @@ def cmd_reason_pretrain(args: argparse.Namespace) -> None:
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         use_sdpa=True,
+        **arch_kwargs(args),
     )
     model = GPTModel(cfg)
     params = sum(p.numel() for p in model.parameters())
     print(f"device={device} train_tokens={len(train_ids):,} params={params:,}")
+    if cfg.n_experts:
+        print(f"active params={count_parameters(model, active=True):,}")
     train_loader = create_dataloader(
         train_ids, cfg.context_length, args.batch_size, stride=1, shuffle=True
     )
@@ -1422,6 +1454,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--grad-accum", type=int, default=1, help="micro-batches per optimizer step (default 1)"
     )
     s.add_argument("--bf16", action="store_true", help="bf16 autocast for forward and loss")
+    add_arch_args(s)
     add_optim_arg(s)
     s.set_defaults(func=cmd_pretrain)
 
@@ -1623,6 +1656,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--eval-interval", type=int, default=250)
     s.add_argument("--seed", type=int, default=0)
     add_ops_arg(s)
+    add_arch_args(s)
     add_optim_arg(s)
     s.set_defaults(func=cmd_reason_pretrain)
 
