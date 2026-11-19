@@ -27,6 +27,7 @@ with a k3 KL penalty to the frozen SFT reference. Two choices follow the sources
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from collections.abc import Callable, Sequence
@@ -79,10 +80,22 @@ def default_reward(task: Task, completion: str) -> float:
 
 
 def group_advantages(
-    rewards: torch.Tensor, std_norm: bool = True, eps: float = 1e-4
+    rewards: torch.Tensor, std_norm: bool = True, eps: float = 1e-4, mode: str = "group"
 ) -> torch.Tensor:
-    """Advantages of `(groups, G)` rewards: centred per group, divided by the group std if asked."""
+    """Advantages of `(groups, G)` rewards, centred per group.
+
+    `group` divides by the group std if `std_norm`. `batch` divides by the std over the whole
+    batch instead (Magistral section 2.1: group-centred, then normalised per minibatch).
+    `rloo` is the leave-one-out baseline `r_i - mean(r_-i) = G/(G-1) * (r_i - mean)`, no std.
+    """
     adv = rewards - rewards.mean(dim=1, keepdim=True)
+    if mode == "batch":
+        return adv / (adv.std(correction=0) + eps)
+    if mode == "rloo":
+        g = rewards.shape[1]
+        return adv * g / max(g - 1, 1)
+    if mode != "group":
+        raise ValueError(f"advantage must be 'group', 'batch' or 'rloo', got {mode!r}")
     if std_norm:
         adv = adv / (rewards.std(dim=1, correction=0, keepdim=True) + eps)
     return adv
@@ -108,14 +121,36 @@ def grpo_loss(
     loss_agg: str = "seq-mean",
     max_len: int = 1,
     unbiased_kl: bool = False,
+    policy_loss: str = "ppo",
+    clip_eps_high: float | None = None,
+    group_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """PPO-clipped GRPO loss and the mean per-token k3 KL (detached).
+    """Clipped policy-gradient loss and the mean per-token k3 KL (detached).
 
     All log-prob tensors are `(B, T)`; `mask` marks completion tokens; `advantages` is `(B,)`.
+    `policy_loss` picks the surrogate (all clip the ratio to `[1 - clip_eps, 1 + clip_eps_high]`,
+    `clip_eps_high` defaulting to `clip_eps`; a larger one is DAPO's Clip-Higher):
+    - `ppo`: GRPO's per-token `min(r A, clip(r) A)`.
+    - `gspo`: Qwen's GSPO (arXiv 2507.18071, eq. 5 and 7): one ratio per sequence,
+      `s = exp(mean_t log pi/pi_old)`, clipped per sequence; the paper's eps are ~3e-4/4e-4.
+    - `cispo`: MiniMax-M1's CISPO (arXiv 2506.13585, eq. 4-5): `sg(clip(r)) A log pi`, so a
+      clipped token still passes gradient (scaled by the clipped weight) instead of being dropped.
+    `loss_agg`: `seq-mean` (per-sequence token mean), `token-sum` (constant `max_len`),
+    `token-mean` (sum over every token / total tokens in the batch, DAPO eq. 8) or `group-mean`
+    (per group of `group_size` rows: sum / the group's total length, Magistral section 2.1).
     """
-    ratio = torch.exp(logps - old_logps)
     adv = advantages.unsqueeze(1)
-    surrogate = torch.minimum(ratio * adv, ratio.clamp(1 - clip_eps, 1 + clip_eps) * adv)
+    ratio = torch.exp(logps - old_logps)
+    high = clip_eps if clip_eps_high is None else clip_eps_high
+    if policy_loss == "ppo":
+        surrogate = torch.minimum(ratio * adv, ratio.clamp(1 - clip_eps, 1 + high) * adv)
+    elif policy_loss == "gspo":
+        s = torch.exp(((logps - old_logps) * mask).sum(1) / mask.sum(1).clamp(min=1)).unsqueeze(1)
+        surrogate = torch.minimum(s * adv, s.clamp(1 - clip_eps, 1 + high) * adv)
+    elif policy_loss == "cispo":
+        surrogate = ratio.detach().clamp(1 - clip_eps, 1 + high) * adv * logps
+    else:
+        raise ValueError(f"policy_loss must be 'ppo', 'gspo' or 'cispo', got {policy_loss!r}")
     kl = kl_k3(logps, ref_logps)
     if unbiased_kl:
         kl = ratio * kl
@@ -124,8 +159,16 @@ def grpo_loss(
         loss = (per_token.sum(dim=1) / mask.sum(dim=1).clamp(min=1)).mean()
     elif loss_agg == "token-sum":
         loss = (per_token.sum(dim=1) / max_len).mean()
+    elif loss_agg == "token-mean":
+        loss = per_token.sum() / mask.sum().clamp(min=1)
+    elif loss_agg == "group-mean":
+        by_group = per_token.sum(dim=1).reshape(-1, group_size).sum(dim=1)
+        loss = (by_group / mask.sum(dim=1).reshape(-1, group_size).sum(dim=1).clamp(min=1)).mean()
     else:
-        raise ValueError(f"loss_agg must be 'seq-mean' or 'token-sum', got {loss_agg!r}")
+        raise ValueError(
+            f"loss_agg must be 'seq-mean', 'token-sum', 'token-mean' or 'group-mean', "
+            f"got {loss_agg!r}"
+        )
     return loss, ((kl * mask).sum() / mask.sum().clamp(min=1)).detach()
 
 
@@ -144,6 +187,9 @@ def grpo_step(
     loss_agg: str = "seq-mean",
     max_len: int = 80,
     unbiased_kl: bool = False,
+    policy_loss: str = "ppo",
+    clip_eps_high: float | None = None,
+    advantage: str = "group",
 ) -> float:
     """`mu` optimizer steps on one batch; returns the mean KL to the reference of the last one.
 
@@ -151,7 +197,7 @@ def grpo_step(
     log-probs are taken before the first inner step, so the ratio starts at exactly 1.
     """
     device = next(policy.parameters()).device
-    adv = group_advantages(rewards, std_norm).reshape(-1).to(device)
+    adv = group_advantages(rewards, std_norm, mode=advantage).reshape(-1).to(device)
     x, y = build_batch(prompts, completions, pad_id)
     x, y = x.to(device), y.to(device)
     policy.eval()  # dropout off, so the policy at step 0 is exactly the reference
@@ -162,7 +208,19 @@ def grpo_step(
     for _ in range(mu):
         logps, mask = per_token_log_probs(policy, x, y)
         loss, kl_mean = grpo_loss(
-            logps, old_logps, ref_logps, mask, adv, clip_eps, beta, loss_agg, max_len, unbiased_kl
+            logps,
+            old_logps,
+            ref_logps,
+            mask,
+            adv,
+            clip_eps,
+            beta,
+            loss_agg,
+            max_len,
+            unbiased_kl,
+            policy_loss,
+            clip_eps_high,
+            rewards.shape[1],
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()  # type: ignore[no-untyped-call]
@@ -199,6 +257,10 @@ def train_grpo(
     on_step: Callable[[dict[str, float]], None] | None = None,
     seed: int = 0,
     device: torch.device | None = None,
+    policy_loss: str = "ppo",
+    clip_eps_high: float | None = None,
+    advantage: str = "group",
+    ref_reset_every: int = 0,
 ) -> dict[str, Any]:
     """Run GRPO; `ref` stays frozen. Returns `{"history": [per-step dict]}`.
 
@@ -214,6 +276,12 @@ def train_grpo(
     `length_penalty(., effort_coef(b, efforts, effort_k0))`, `tasks_per_step` still counts tasks
     (so `tasks_per_step * len(efforts)` groups), and the record adds `think_e{b}` (mean think
     tokens) and `acc_e{b}` per level.
+
+    `policy_loss`, `clip_eps_high` and `advantage` select the loss variants of `grpo_loss` and
+    `group_advantages`. With `ref_reset_every=N` (ProRL, arXiv 2505.24864 section 2.3.1), every N
+    steps the reference becomes a snapshot of the current policy and the optimizer state is
+    re-initialised; `ref` is copied first, so the caller's stays at the start model, and `kl`
+    is then measured against the latest snapshot.
     """
     levels: tuple[int | None, ...] = efforts or (None,)
     prefix_len = max(len(effort_prefix(b)) for b in levels)
@@ -224,11 +292,16 @@ def train_grpo(
     policy.to(device)
     ref.to(device).eval()
     ref.requires_grad_(False)
+    if ref_reset_every:
+        ref = copy.deepcopy(ref)
     optimizer = configure_optimizers(policy, weight_decay=0.0, learning_rate=lr)
     rng = random.Random(seed)
     eos, pad = tok.eos_token_id, tok.special_to_id["<|pad|>"]
     history: list[dict[str, float]] = []
     for step in range(steps):
+        if ref_reset_every and step and step % ref_reset_every == 0:
+            ref.load_state_dict(policy.state_dict())
+            optimizer = configure_optimizers(policy, weight_decay=0.0, learning_rate=lr)
         entries: list[tuple[Task, int | None]] = []  # one per group: (task, effort)
         prompts: list[list[int]] = []
         groups: list[list[list[int]]] = []
@@ -274,6 +347,9 @@ def train_grpo(
                 loss_agg,
                 max_new_tokens,
                 unbiased_kl,
+                policy_loss,
+                clip_eps_high,
+                advantage,
             )
         samples: Samples = [(t, s) for (t, _), g in zip(entries, texts, strict=True) for s in g]
         n = len(samples)
