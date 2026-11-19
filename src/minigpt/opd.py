@@ -3,8 +3,11 @@
 Public source: DeepSeek-V4.1 tech report, section 5.1 ("SFT followed by RL and on-policy
 distillation (OPD)") and section 5.2.4, which ends post-training with full-vocabulary OPD from
 many teachers. Related: Gu et al. 2024 (MiniLLM, reverse KL for distillation) and Thinking
-Machines 2025, "On-policy distillation". This module is a small single-teacher copy; the
-specifics below (arithmetic task, one teacher, loss details) are this repo's choices.
+Machines 2025, "On-policy distillation". This module is a small copy with one teacher per
+operator (addition, subtraction); the specifics below (arithmetic tasks, loss details) are this
+repo's choices. With several teachers each prompt is scored against the teacher of its operator
+and the loss is the token-weighted mean of the per-teacher KLs, like V4.1's merge of per-domain
+specialists into one student.
 
 Each step the *student* samples completions, then at every completion position the student's
 whole next-token distribution is pulled toward the frozen teacher's under the same prefix:
@@ -28,6 +31,7 @@ prefixes the student produces.
 from __future__ import annotations
 
 import random
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 import torch
@@ -39,10 +43,10 @@ from minigpt.reason import (
     Task,
     accuracy_reward,
     build_batch,
-    make_task,
     per_token_log_probs,
     reasoning_tokenizer,
     sample_group,
+    sample_task,
 )
 from minigpt.train import configure_optimizers, get_device
 
@@ -85,54 +89,96 @@ def opd_loss(
     return token_kl(student_logits, teacher_logits, labels != -100, mode)
 
 
+def routed_opd_loss(
+    student: nn.Module,
+    teachers: Mapping[str, nn.Module],
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    row_ops: Sequence[str],
+    mode: KLMode = "reverse",
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """KL against each row's own teacher, `teachers[row_ops[i]]` for row `i`.
+
+    The loss is the token-weighted mean over teachers: a teacher's weight is its share of the
+    batch's completion tokens (so it equals the plain per-token mean over the whole batch).
+    Also returns each op's mean KL per token, detached.
+    """
+    n_total = (labels != -100).sum().clamp(min=1)
+    parts: list[torch.Tensor] = []
+    by_op: dict[str, float] = {}
+    for op in dict.fromkeys(row_ops):
+        idx = torch.tensor([i for i, o in enumerate(row_ops) if o == op], device=input_ids.device)
+        y = labels[idx]
+        op_kl = opd_loss(student, teachers[op], input_ids[idx], y, mode)
+        parts.append(op_kl * (y != -100).sum() / n_total)
+        by_op[op] = op_kl.item()
+    return torch.stack(parts).sum(), by_op
+
+
 def _rollouts(
-    sampler: GPTModel,
+    samplers: Mapping[str, GPTModel],
     tasks: list[Task],
     group: int,
     max_new_tokens: int,
     temperature: float,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, list[list[int]]]:
-    """`sampler` completes each task `group` times; returns `(input_ids, labels, completions)`."""
+) -> tuple[torch.Tensor, torch.Tensor, list[list[int]], list[str]]:
+    """`samplers[task.op]` completes each task `group` times.
+
+    Returns `(input_ids, labels, completions, row_ops)`; `row_ops[i]` is the op of row `i`.
+    """
     tok = reasoning_tokenizer()
     pad_id = tok.special_to_id["<|pad|>"]
     prompts: list[list[int]] = []
     completions: list[list[int]] = []
+    row_ops: list[str] = []
     for t in tasks:
         ids = tok.encode(t.prompt)
-        for c in sample_group(sampler, ids, group, max_new_tokens, tok.eos_token_id, temperature):
+        for c in sample_group(
+            samplers[t.op], ids, group, max_new_tokens, tok.eos_token_id, temperature
+        ):
             prompts.append(ids)
             completions.append(c)
+            row_ops.append(t.op)
     x, y = build_batch(prompts, completions, pad_id)
-    return x.to(device), y.to(device), completions
+    return x.to(device), y.to(device), completions, row_ops
 
 
 @torch.no_grad()
 def evaluate_student(
     student: GPTModel,
-    teacher: GPTModel,
+    teachers: Mapping[str, GPTModel],
     tasks: list[Task],
     max_new_tokens: int,
     device: torch.device,
 ) -> dict[str, float]:
-    """Greedy student rollouts: accuracy, mean completion length, and reverse KL per token."""
-    x, y, completions = _rollouts(student, tasks, 1, max_new_tokens, 0.0, device)
+    """Greedy student rollouts: accuracy, mean completion length, and reverse KL per token.
+
+    Each task is scored against its op's teacher. The row also holds `accuracy[op]` and `kl[op]`
+    for every op among `tasks`.
+    """
+    x, y, completions, row_ops = _rollouts(
+        {op: student for op in teachers}, tasks, 1, max_new_tokens, 0.0, device
+    )
     tok = reasoning_tokenizer()
     eos = tok.eos_token_id
-    correct = sum(
+    hits = [
         accuracy_reward(t, tok.decode([i for i in c if i != eos]))
         for t, c in zip(tasks, completions, strict=True)
-    )
-    return {
-        "accuracy": correct / len(tasks),
-        "mean_len": sum(len(c) for c in completions) / len(completions),
-        "kl": opd_loss(student, teacher, x, y, "reverse").item(),
-    }
+    ]
+    kl, kl_by_op = routed_opd_loss(student, teachers, x, y, row_ops, "reverse")
+    row = {"accuracy": sum(hits) / len(tasks), "mean_len": sum(map(len, completions)) / len(tasks)}
+    row["kl"] = kl.item()
+    for op, op_kl in kl_by_op.items():
+        op_hits = [h for h, o in zip(hits, row_ops, strict=True) if o == op]
+        row[f"accuracy[{op}]"] = sum(op_hits) / len(op_hits)
+        row[f"kl[{op}]"] = op_kl
+    return row
 
 
 def train_opd(
     student: GPTModel,
-    teacher: GPTModel,
+    teachers: GPTModel | Mapping[str, GPTModel],
     steps: int = 100,
     batch_size: int = 8,
     group: int = 1,
@@ -146,53 +192,62 @@ def train_opd(
     eval_tasks: int = 64,
     seed: int = 0,
     device: torch.device | None = None,
+    ops: Sequence[str] = "+",
 ) -> dict[str, Any]:
-    """Distil `teacher` into `student` on addition prompts of 1..`digits` digits.
+    """Distil `teachers` into `student` on prompts of 1..`digits` digits, one op drawn from `ops`.
 
+    `teachers` maps op -> frozen model (a single model serves every op). Each prompt is scored
+    against its op's teacher and the loss is the token-weighted mean of the per-teacher KLs.
     On-policy (default): the student samples at `temperature`, the loss is `kl` against the
-    teacher on those samples. `off_policy`: the teacher samples at `temperature` (0 = greedy)
-    and the student minimises cross-entropy on them; `kl` is then unused for training.
-    Every `eval_every` steps (and at step 0) both modes are scored the same way, on a fixed
-    seeded task set with greedy student rollouts, so their reverse-KL curves are comparable.
+    teacher on those samples. `off_policy`: each prompt is sampled from its op's teacher at
+    `temperature` (0 = greedy) and the student minimises cross-entropy on them; `kl` is then
+    unused for training. Every `eval_every` steps (and at step 0) both modes are scored the same
+    way, on a fixed seeded task set with greedy student rollouts, so their reverse-KL curves are
+    comparable.
     """
-    if student.config.vocab_size != teacher.config.vocab_size:
+    if isinstance(teachers, GPTModel):
+        teachers = {op: teachers for op in ops}
+    if missing := [op for op in ops if op not in teachers]:
+        raise ValueError(f"no teacher for op(s) {missing}")
+    routes = {op: teachers[op] for op in ops}
+    frozen = list({id(m): m for m in routes.values()}.values())
+    if any(student.config.vocab_size != m.config.vocab_size for m in frozen):
         raise ValueError("student and teacher must share one vocabulary")
     longest = 2 * digits + 2 + max_new_tokens  # prompt "999+999=" plus the completion
-    if longest > min(student.config.context_length, teacher.config.context_length):
+    if longest > min(m.config.context_length for m in [student, *frozen]):
         raise ValueError(f"prompt + max_new_tokens = {longest} exceeds a model's context length")
     if device is None:
         device = get_device()
 
     student.to(device)
-    teacher.to(device)
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
+    for m in frozen:
+        m.to(device).eval()
+        m.requires_grad_(False)
     student.eval()  # dropout off, so sampling and scoring see the same distribution
     optimizer = configure_optimizers(student, learning_rate=lr, weight_decay=0.01)
 
     rng = random.Random(seed)
     eval_rng = random.Random(seed + 10_000)
-    held_out = [make_task(eval_rng, eval_rng.randint(1, digits)) for _ in range(eval_tasks)]
-    sampler = teacher if off_policy else student
+    held_out = [sample_task(eval_rng, eval_rng.randint(1, digits), ops) for _ in range(eval_tasks)]
+    samplers = routes if off_policy else {op: student for op in ops}
 
     history: list[dict[str, float]] = []
     run_loss, run_n = 0.0, 0
     for step in range(steps + 1):
         if step % eval_every == 0 or step == steps:
-            row = evaluate_student(student, teacher, held_out, max_new_tokens, device)
+            row = evaluate_student(student, routes, held_out, max_new_tokens, device)
             history.append({"step": float(step), "loss": run_loss / max(1, run_n), **row})
             run_loss, run_n = 0.0, 0
         if step == steps:
             break
 
-        tasks = [make_task(rng, rng.randint(1, digits)) for _ in range(batch_size)]
-        x, y, _ = _rollouts(sampler, tasks, group, max_new_tokens, temperature, device)
+        tasks = [sample_task(rng, rng.randint(1, digits), ops) for _ in range(batch_size)]
+        x, y, _, row_ops = _rollouts(samplers, tasks, group, max_new_tokens, temperature, device)
         if off_policy:
             logps, mask = per_token_log_probs(student, x, y)
             loss = -logps.sum() / mask.sum().clamp(min=1)
         else:
-            loss = opd_loss(student, teacher, x, y, kl)
+            loss, _ = routed_opd_loss(student, routes, x, y, row_ops, kl)
         optimizer.zero_grad()
         loss.backward()  # type: ignore[no-untyped-call]
         torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
