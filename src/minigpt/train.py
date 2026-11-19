@@ -1,4 +1,4 @@
-"""Training loop: AdamW, cosine LR with warmup, grad clipping, eval, checkpointing."""
+"""Training loop: AdamW or Muon, cosine LR with warmup, grad clipping, eval, checkpointing."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader
 
 from minigpt.model import GPTConfig, GPTModel
@@ -26,25 +26,118 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
+# Hybrid Newton-Schulz coefficients (a, b, c): 8 fast steps, then 2 that pin singular values at 1.
+# DeepSeek-V4 report section 2.4, eq. 28.
+NS_FAST = (3.4445, -4.7750, 2.0315)
+NS_FINAL = (2.0, -1.5, 0.5)
+
+
+def newton_schulz(m: torch.Tensor, fast_steps: int = 8, final_steps: int = 2) -> torch.Tensor:
+    """Approximately orthogonalise `m` to U V^T (its SVD with all singular values set to 1).
+
+    Hybrid Newton-Schulz of DeepSeek-V4 report section 2.4: Frobenius-normalise, then iterate
+    M <- a M + b (M M^T) M + c (M M^T)^2 M with `NS_FAST` coefficients, then `NS_FINAL` ones.
+    Runs on the short side (transposed if tall) so M M^T is the small Gram matrix.
+    """
+    x: torch.Tensor = m / (m.norm() + 1e-7)
+    tall = x.shape[0] > x.shape[1]
+    if tall:
+        x = x.transpose(0, 1)
+    for a, b, c in [NS_FAST] * fast_steps + [NS_FINAL] * final_steps:
+        gram = x @ x.transpose(0, 1)
+        x = a * x + (b * gram + c * gram @ gram) @ x
+    return x.transpose(0, 1) if tall else x
+
+
+class Muon(Optimizer):
+    """Muon (Jordan et al. 2024) as in DeepSeek-V4 report section 2.4, Algorithm 1.
+
+    Per 2-D weight W (n x m): Nesterov momentum, hybrid Newton-Schulz, update scaled by
+    sqrt(max(n, m)) * rms so its RMS is `rms` (Liu et al. 2025, Moonlight: lets an AdamW learning
+    rate be reused; V4 uses 0.18), then decoupled weight decay: W <- W (1 - lr wd) - lr O.
+    """
+
+    def __init__(
+        self,
+        params: Any,
+        lr: float = 6e-4,
+        momentum: float = 0.95,
+        weight_decay: float = 0.1,
+        rms: float = 0.18,
+    ) -> None:
+        super().__init__(
+            params, {"lr": lr, "momentum": momentum, "weight_decay": weight_decay, "rms": rms}
+        )
+
+    @torch.no_grad()
+    def step(self, closure: Any = None) -> Any:
+        for group in self.param_groups:
+            lr, mu = group["lr"], group["momentum"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                buf = self.state[p].setdefault("momentum_buffer", torch.zeros_like(p))
+                buf.mul_(mu).add_(p.grad)
+                update = newton_schulz(p.grad.add(buf, alpha=mu))
+                p.mul_(1.0 - lr * group["weight_decay"])
+                p.add_(update, alpha=-lr * group["rms"] * max(p.shape) ** 0.5)
+
+
+class MuonAdamW(Optimizer):
+    """Muon on its param groups, AdamW on the rest, behind one optimizer.
+
+    The param groups are shared with the two inner optimizers, so a learning-rate schedule that
+    writes `param_groups[i]["lr"]` reaches both. The state dict holds one entry per inner one.
+    """
+
+    def __init__(self, muon: Muon, adamw: AdamW) -> None:
+        self.inner = {"muon": muon, "adamw": adamw}
+        super().__init__([g for o in self.inner.values() for g in o.param_groups], {})
+
+    @torch.no_grad()
+    def step(self, closure: Any = None) -> Any:
+        for opt in self.inner.values():
+            opt.step()
+
+    def state_dict(self) -> dict[str, Any]:
+        return {name: opt.state_dict() for name, opt in self.inner.items()}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        for name, opt in self.inner.items():
+            opt.load_state_dict(state_dict[name])
+
+
 def configure_optimizers(
     model: nn.Module,
     weight_decay: float = 0.1,
     learning_rate: float = 6e-4,
     betas: tuple[float, float] = (0.9, 0.95),
     eps: float = 1e-8,
-) -> AdamW:
-    """Configure AdamW with decoupled weight decay.
+    optim: str = "adamw",
+) -> Optimizer:
+    """Configure AdamW with decoupled weight decay, or Muon + AdamW with `optim="muon"`.
 
-    Applies weight decay to 2D matrix weights (embeddings, linear layers)
-    and excludes 1D biases and layer normalizations.
+    AdamW applies weight decay to 2D matrix weights (embeddings, linear layers) and excludes 1D
+    biases and layer normalizations. With Muon (DeepSeek-V4 report section 2.4) every 2D weight
+    outside the embeddings and the heads (any parameter named `*head*`) moves to Muon; those
+    stay on AdamW with everything 1D. Muon reuses `weight_decay` and `learning_rate`.
     """
+    if optim not in ("adamw", "muon"):
+        raise ValueError(f"unknown optimizer {optim!r}: expected 'adamw' or 'muon'")
+    embeddings = {
+        id(p) for m in model.modules() if isinstance(m, nn.Embedding) for p in m.parameters()
+    }
+    muon_params: list[torch.nn.Parameter] = []
     decay_params: list[torch.nn.Parameter] = []
     no_decay_params: list[torch.nn.Parameter] = []
 
-    for _name, param in model.named_parameters():
+    for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if param.dim() >= 2:
+        hidden = param.dim() == 2 and id(param) not in embeddings and "head" not in name
+        if optim == "muon" and hidden:
+            muon_params.append(param)
+        elif param.dim() >= 2:
             decay_params.append(param)
         else:
             no_decay_params.append(param)
@@ -53,8 +146,10 @@ def configure_optimizers(
         {"params": decay_params, "weight_decay": weight_decay},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
-
-    return AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps)
+    adamw = AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps)
+    if optim == "adamw":
+        return adamw
+    return MuonAdamW(Muon(muon_params, lr=learning_rate, weight_decay=weight_decay), adamw)
 
 
 def get_lr_multiplier(
@@ -105,7 +200,7 @@ def window_losses(
 def save_checkpoint(
     path: str | Path,
     model: GPTModel,
-    optimizer: AdamW | None,
+    optimizer: Optimizer | None,
     step: int,
     val_loss: float,
     extra: dict[str, Any] | None = None,
@@ -129,7 +224,7 @@ def save_checkpoint(
 def load_checkpoint(
     path: str | Path,
     model: GPTModel,
-    optimizer: AdamW | None = None,
+    optimizer: Optimizer | None = None,
     device: torch.device | None = None,
 ) -> dict[str, Any]:
     """Load training checkpoint into model and optional optimizer."""
@@ -167,6 +262,7 @@ def train(
     device: torch.device | None = None,
     grad_accum_steps: int = 1,
     bf16: bool = False,
+    optim: str = "adamw",
 ) -> dict[str, Any]:
     """Execute pretraining loop.
 
@@ -178,7 +274,9 @@ def train(
     model.to(device)
     model.train()
 
-    optimizer = configure_optimizers(model, weight_decay=weight_decay, learning_rate=learning_rate)
+    optimizer = configure_optimizers(
+        model, weight_decay=weight_decay, learning_rate=learning_rate, optim=optim
+    )
 
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)

@@ -226,6 +226,7 @@ def train_opd(
     device: torch.device | None = None,
     ops: Sequence[str] = "+",
     estimator: Estimator = "full",
+    optim: str = "adamw",
     r_max: float = 5.0,
 ) -> dict[str, Any]:
     """Distil `teachers` into `student` on prompts of 1..`digits` digits, one op drawn from `ops`.
@@ -260,7 +261,7 @@ def train_opd(
         m.to(device).eval()
         m.requires_grad_(False)
     student.eval()  # dropout off, so sampling and scoring see the same distribution
-    optimizer = configure_optimizers(student, learning_rate=lr, weight_decay=0.01)
+    optimizer = configure_optimizers(student, learning_rate=lr, weight_decay=0.01, optim=optim)
 
     rng = random.Random(seed)
     eval_rng = random.Random(seed + 10_000)
