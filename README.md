@@ -22,13 +22,18 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | SFT | `sft.py` | Alpaca prompt template, prompt tokens masked with `-100` |
 | DPO | `dpo.py` | DPO loss (β = 0.1) against a frozen reference; pairs = dataset answer (chosen) vs SFT sample (rejected) |
 | Constitutional AI | `cai.py` | judge-LLM critique/revise (SL) and A/B preference labels (RL) under random constitution principles; Ollama judge behind an injectable `ChatJudge` protocol |
+| Reasoning tasks | `reason.py` | verifiable `a+b` / `a-b` tasks with column `<think>` traces, program-checked rewards, rollout and log-prob helpers, greedy eval per digit count |
+| GRPO | `grpo.py` | group-relative advantages, PPO clip, k3 KL to the SFT reference; Dr. GRPO, V3.2 unbiased KL, batch fill and effort-conditioned length-penalty options |
+| OPD | `opd.py` | full-vocabulary reverse-KL on-policy distillation, one teacher per operator |
+| CoT monitor | `monitor.py` | lenient grader that can be hacked and a monitor that flags traces whose work disagrees with the answer |
+| RLHF | `rlhf.py` | Bradley-Terry reward model on the policy's own samples, PPO with GAE and a per-token KL penalty |
 | Eval | `evaluate.py` | perplexity, exact match, token F1, likelihood ranking, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
 
 ## Architecture
 
 ![minigpt model architecture: BPE, embeddings, N pre-LN blocks, final LayerNorm, tied LM head; spam head on the last non-pad token](docs/diagrams/minigpt-model.svg)
 
-![minigpt training pipeline: pretrain, spam classifier, SFT, DPO on 300 sampled rejected answers, eval of SFT and DPO](docs/diagrams/minigpt-pipeline.svg)
+![minigpt chat pipeline: pretrain, spam classifier, SFT, DPO on 300 sampled rejected answers, Constitutional AI (critique and revise, then DPO on judge labels), eval of SFT and DPO](docs/diagrams/minigpt-pipeline.svg)
 
 ## Data and licences
 
@@ -243,7 +248,11 @@ The default change affects only new runs. SFT, DPO, the spam classifier and the 
 
 ## Post-training stages
 
-Small-scale copies of post-training stages that labs describe publicly, run on verifiable addition tasks ([`reason.py`](src/minigpt/reason.py)). The sources are cited for the stage's shape only; nothing here claims to reproduce their results. No stage has been run yet, so no results are reported.
+Small-scale copies of post-training stages that labs describe publicly, run on verifiable arithmetic tasks ([`reason.py`](src/minigpt/reason.py)). The sources are cited for the stage's shape only; nothing here claims to reproduce their results. One-run results are in the table at the end of this section.
+
+![minigpt reasoning post-training: equations, reason-pretrain, cold-start SFT, GRPO addition teacher, subtraction specialist and a weak mixed student merged by multi-teacher on-policy distillation into one student](docs/diagrams/minigpt-reasoning.svg)
+
+![minigpt reasoning side experiments: GRPO against a lenient grader with a CoT monitor, reward model then PPO, effort SFT then effort GRPO, each with its one-run result](docs/diagrams/minigpt-reasoning-side.svg)
 
 ### Reasoning base: pretrain, cold-start SFT, eval
 

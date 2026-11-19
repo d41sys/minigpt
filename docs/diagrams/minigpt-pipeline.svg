@@ -1,17 +1,71 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 960 316" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-pipeline-title minigpt-pipeline-desc" id="minigpt-pipeline-root">
-<title id="minigpt-pipeline-title">minigpt training pipeline</title>
-<desc id="minigpt-pipeline-desc">Pretraining on tiny-Shakespeare feeds the spam classifier and SFT on 900 Alpaca rows; the SFT model samples 300 rejected answers for DPO, and eval scores both SFT and DPO.</desc>
+<title id="minigpt-pipeline-title">minigpt chat pipeline</title>
+<desc id="minigpt-pipeline-desc">Pretraining on tiny-Shakespeare feeds the spam classifier and SFT on 900 Alpaca rows; the SFT model samples 300 rejected answers for DPO and also starts Constitutional AI (judge critique and revision, then DPO on judge preference labels); eval scores SFT and DPO.</desc>
 <defs>
-      <style>#minigpt-pipeline-root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; color: #1f2328; }
-      #minigpt-pipeline-root .diagram-container { width: 100%; overflow-x: auto; }
-      @media print {
-#minigpt-pipeline-root .diagram-container { overflow-x: visible; }
-}</style>
+<style>
+#minigpt-pipeline-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
+#minigpt-pipeline-root .s { fill: #59636e; font-size: 9px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; }
+#minigpt-pipeline-root .lbl { fill: #59636e; font-size: 8px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; letter-spacing: 0.06em; }
+#minigpt-pipeline-root .leg { fill: #59636e; font-size: 9px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+#minigpt-pipeline-root .mask { fill: #ffffff; }
+#minigpt-pipeline-root .stage { fill: #ffffff; stroke: #1f2328; stroke-width: 1; }
+#minigpt-pipeline-root .data { fill: #1f2328; fill-opacity: 0.05; stroke: #59636e; stroke-width: 1; }
+#minigpt-pipeline-root .acc { fill: #0969da; fill-opacity: 0.08; stroke: #0969da; stroke-width: 1; }
+#minigpt-pipeline-root .a { fill: none; stroke: #59636e; stroke-width: 1.2; marker-end: url(#minigpt-pipeline-arrow); }
+#minigpt-pipeline-root .aa { fill: none; stroke: #0969da; stroke-width: 1.2; marker-end: url(#minigpt-pipeline-arrow-accent); }
+</style>
 <marker id="minigpt-pipeline-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#59636e"/></marker>
 <marker id="minigpt-pipeline-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
-<marker id="minigpt-pipeline-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
 </defs>
 <rect width="100%" height="100%" fill="#ffffff"/>
-<path d="M 160,76 L 192,76" fill="none" stroke="#59636e" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow)"/><path d="M 312,76 L 344,76" fill="none" stroke="#59636e" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow)"/><path d="M 464,76 L 496,76" fill="none" stroke="#59636e" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow)"/><path d="M 616,76 L 648,76" fill="none" stroke="#0969da" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow-accent)"/><path d="M 768,76 L 800,76" fill="none" stroke="#59636e" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow)"/><path d="M 252,104 L 252,168" fill="none" stroke="#59636e" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow)"/><path d="M 404,104 V 136 Q 404,144 412,144 H 852 Q 860,144 860,136 V 104" fill="none" stroke="#59636e" stroke-width="1.2" marker-end="url(#minigpt-pipeline-arrow)"/><rect x="602" y="126" width="60" height="12" rx="2" fill="#ffffff"/><text x="632" y="135" fill="#59636e" font-size="8" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">SFT SCORED</text><rect x="40" y="48" width="120" height="56" rx="6" fill="#ffffff"/><rect x="40" y="48" width="120" height="56" rx="6" fill="#1f2328" stroke="#59636e" stroke-width="1" fill-opacity="0.05"/><text x="100" y="74" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">Shakespeare</text><text x="100" y="90" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">tiny, 1.1 MB</text><rect x="192" y="48" width="120" height="56" rx="6" fill="#ffffff"/><rect x="192" y="48" width="120" height="56" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1"/><text x="252" y="74" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">pretrain</text><text x="252" y="90" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">5M params</text><rect x="344" y="48" width="120" height="56" rx="6" fill="#ffffff"/><rect x="344" y="48" width="120" height="56" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1"/><text x="404" y="74" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">SFT</text><text x="404" y="90" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">Alpaca, 900 rows</text><rect x="496" y="48" width="120" height="56" rx="6" fill="#ffffff"/><rect x="496" y="48" width="120" height="56" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1"/><text x="556" y="74" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">300 samples</text><text x="556" y="90" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">rejected answers</text><rect x="648" y="48" width="120" height="56" rx="6" fill="#ffffff"/><rect x="648" y="48" width="120" height="56" rx="6" fill="#0969da" stroke="#0969da" stroke-width="1" fill-opacity="0.08"/><text x="708" y="74" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">DPO</text><text x="708" y="90" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">vs frozen SFT ref</text><rect x="800" y="48" width="120" height="56" rx="6" fill="#ffffff"/><rect x="800" y="48" width="120" height="56" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1"/><text x="860" y="74" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">eval</text><text x="860" y="90" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">ppl·EM·F1·judge</text><rect x="192" y="168" width="120" height="56" rx="6" fill="#ffffff"/><rect x="192" y="168" width="120" height="56" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="1"/><text x="252" y="194" fill="#1f2328" font-size="12" font-weight="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" text-anchor="middle">spam classifier</text><text x="252" y="210" fill="#59636e" font-size="9" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">SMS Spam</text><line x1="40" y1="260" x2="920" y2="260" stroke="#1f2328" stroke-width="0.8" stroke-opacity="0.10"/><text x="40" y="280" fill="#59636e" font-size="8" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">LEGEND</text><rect x="120" y="272" width="24" height="12" rx="2" fill="#1f2328" stroke="#59636e" stroke-width="1" fill-opacity="0.05"/><text x="152" y="280" fill="#59636e" font-size="9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">data</text><rect x="320" y="272" width="24" height="12" rx="2" fill="#ffffff" stroke="#1f2328" stroke-width="1"/><text x="352" y="280" fill="#59636e" font-size="9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">stage</text><rect x="520" y="272" width="24" height="12" rx="2" fill="#0969da" stroke="#0969da" stroke-width="1" fill-opacity="0.08"/><text x="552" y="280" fill="#59636e" font-size="9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">preference tuning</text>
+<path class="a" d="M 160,76 L 192,76"/>
+<path class="a" d="M 312,76 L 344,76"/>
+<path class="a" d="M 464,76 L 496,76"/>
+<path class="aa" d="M 616,76 L 648,76"/>
+<path class="a" d="M 768,76 L 800,76"/>
+<path class="a" d="M 252,104 L 252,168"/>
+<path class="a" d="M 424,104 V 136 Q 424,144 432,144 H 852 Q 860,144 860,136 V 104"/>
+<path class="a" d="M 384,104 L 384,168"/>
+<path class="aa" d="M 464,196 L 496,196"/>
+<rect class="mask" x="602" y="126" width="60" height="12" rx="2"/>
+<text class="lbl" x="632" y="135">SFT SCORED</text>
+<rect class="mask" x="40" y="48" width="120" height="56" rx="6"/>
+<rect class="data" x="40" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="100" y="74">Shakespeare</text>
+<text class="s" x="100" y="90">tiny, 1.1 MB</text>
+<rect class="stage" x="192" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="252" y="74">pretrain</text>
+<text class="s" x="252" y="90">5M params</text>
+<rect class="stage" x="344" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="404" y="74">SFT</text>
+<text class="s" x="404" y="90">Alpaca, 900 rows</text>
+<rect class="stage" x="496" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="556" y="74">300 samples</text>
+<text class="s" x="556" y="90">rejected answers</text>
+<rect class="mask" x="648" y="48" width="120" height="56" rx="6"/>
+<rect class="acc" x="648" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="708" y="74">DPO</text>
+<text class="s" x="708" y="90">vs frozen SFT ref</text>
+<rect class="stage" x="800" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="860" y="74">eval</text>
+<text class="s" x="860" y="90">ppl·EM·F1·judge</text>
+<rect class="stage" x="192" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="252" y="194">spam classifier</text>
+<text class="s" x="252" y="210">SMS Spam</text>
+<rect class="stage" x="344" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="404" y="194">CAI: SL</text>
+<text class="s" x="404" y="210">critique + revise</text>
+<rect class="mask" x="496" y="168" width="120" height="56" rx="6"/>
+<rect class="acc" x="496" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="556" y="194">CAI: RL</text>
+<text class="s" x="556" y="210">DPO on judge A/B</text>
+<line x1="40" y1="260" x2="920" y2="260" stroke="#1f2328" stroke-width="0.8" stroke-opacity="0.10"/>
+<text x="40" y="280" fill="#59636e" font-size="8" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">LEGEND</text>
+<rect class="data" x="120" y="272" width="24" height="12" rx="2"/>
+<text class="leg" x="152" y="281">data</text>
+<rect class="stage" x="320" y="272" width="24" height="12" rx="2"/>
+<text class="leg" x="352" y="281">stage</text>
+<rect class="acc" x="520" y="272" width="24" height="12" rx="2"/>
+<text class="leg" x="552" y="281">preference tuning</text>
 </svg>
