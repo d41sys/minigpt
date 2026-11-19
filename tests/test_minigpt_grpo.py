@@ -127,3 +127,25 @@ def test_groups_with_equal_rewards_are_dropped_and_leave_the_weights_alone() -> 
     assert [h["n"] for h in history] == [12.0, 12.0]
     after = policy.state_dict()
     assert all(torch.equal(v, after[k]) for k, v in before.items())
+
+
+def test_fill_batch_resamples_until_max_rounds_when_every_group_is_flat() -> None:
+    torch.manual_seed(0)
+    policy = GPTModel(TINY)
+    out = train_grpo(
+        policy,
+        copy.deepcopy(policy),
+        reasoning_tokenizer(),
+        steps=1,
+        tasks_per_step=2,
+        group_size=3,
+        digits=(1, 1),
+        max_new_tokens=6,
+        fill_batch=True,
+        max_rounds=3,
+        reward_fn=lambda _t, _c: 0.5,
+        observe=lambda samples: {"n": float(len(samples))},
+        device=torch.device("cpu"),
+    )
+    (h,) = out["history"]
+    assert (h["tasks_sampled"], h["n"], h["drop_rate"]) == (6.0, 18.0, 1.0)

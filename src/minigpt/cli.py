@@ -972,7 +972,10 @@ def run_grpo(
     tok = reasoning_tokenizer()
     policy = load_model(require(Path(args.base), "reason-sft"))
     ref = load_model(args.base)
-    print(f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm}")
+    print(
+        f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm} "
+        f"unbiased_kl={args.unbiased_kl} fill_batch={args.fill_batch}"
+    )
 
     def log(rec: dict[str, float]) -> None:
         if int(rec["step"]) % args.log_every == 0:
@@ -996,6 +999,8 @@ def run_grpo(
         mu=args.mu,
         std_norm=not args.no_std_norm,
         loss_agg=args.loss_agg,
+        unbiased_kl=args.unbiased_kl,
+        fill_batch=args.fill_batch,
         reward_fn=reward_fn,
         observe=observe,
         on_step=log,
@@ -1056,6 +1061,16 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         choices=["seq-mean", "token-sum"],
         default="seq-mean",
         help="per-sequence token mean (GRPO) or sum over a constant max length (Dr. GRPO)",
+    )
+    s.add_argument(
+        "--unbiased-kl",
+        action="store_true",
+        help="k3 KL times pi/pi_old, DeepSeek-V3.2's unbiased estimate",
+    )
+    s.add_argument(
+        "--fill-batch",
+        action="store_true",
+        help="resample (up to 4 rounds) until --tasks groups have mixed rewards (DAPO)",
     )
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
