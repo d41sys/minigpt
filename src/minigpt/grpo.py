@@ -246,10 +246,7 @@ def train_grpo(
             texts += [[decode_completion(tok, c) for c in g] for g in new_groups]
             rewards = torch.tensor(
                 [
-                    [
-                        reward_fn(t, s) + (0.0 if b is None else length_penalty(s, ks[b]))
-                        for s in g
-                    ]
+                    [reward_fn(t, s) + (0.0 if b is None else length_penalty(s, ks[b])) for s in g]
                     for (t, b), g in zip(entries, texts, strict=True)
                 ]
             )
