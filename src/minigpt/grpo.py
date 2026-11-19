@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
@@ -43,9 +43,9 @@ from minigpt.reason import (
     decode_completion,
     effort_prefix,
     format_reward,
-    make_task,
     per_token_log_probs,
     sample_group,
+    sample_task,
     think_tokens,
 )
 from minigpt.train import configure_optimizers, get_device
@@ -194,6 +194,7 @@ def train_grpo(
     efforts: tuple[int, ...] = (),
     effort_k0: float = 0.5,
     reward_fn: RewardFn = default_reward,
+    ops: Sequence[str] = "+",
     observe: Callable[[Samples], dict[str, float]] | None = None,
     on_step: Callable[[dict[str, float]], None] | None = None,
     seed: int = 0,
@@ -233,7 +234,7 @@ def train_grpo(
         groups: list[list[list[int]]] = []
         texts: list[list[str]] = []
         for _ in range(max_rounds if fill_batch else 1):
-            new_tasks = [make_task(rng, rng.randint(*digits)) for _ in range(tasks_per_step)]
+            new_tasks = [sample_task(rng, rng.randint(*digits), ops) for _ in range(tasks_per_step)]
             new = [(t, b) for t in new_tasks for b in levels]
             new_prompts = [tok.encode(effort_prefix(b) + t.prompt) for t, b in new]
             new_groups = [

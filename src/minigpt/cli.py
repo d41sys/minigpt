@@ -71,10 +71,12 @@ from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
 from minigpt.reason import (
+    OPS,
     equation_corpus,
     evaluate_reasoning,
     make_task,
     reasoning_tokenizer,
+    sample_task,
     sft_trace_dataset,
 )
 from minigpt.rlhf import (
@@ -424,19 +426,46 @@ def cmd_dpo(args: argparse.Namespace) -> None:
     print(f"checkpoint -> {out}")
 
 
+def parse_ops(text: str) -> tuple[str, ...]:
+    """`--ops` value: comma-separated operators, e.g. `+` or `+,-`."""
+    ops = tuple(dict.fromkeys(text.split(",")))
+    if any(op not in OPS for op in ops):
+        raise argparse.ArgumentTypeError(f"--ops: comma list of {','.join(OPS)}, got {text!r}")
+    return ops
+
+
+def add_ops_arg(s: argparse.ArgumentParser) -> None:
+    s.add_argument("--ops", type=parse_ops, default=("+",), help="operators to use, e.g. + or +,-")
+
+
+def load_teachers(specs: list[str], ops: tuple[str, ...]) -> dict[str, GPTModel]:
+    """One model per op from `OP=PATH` (that op only) and plain `PATH` (every op) specs."""
+    teachers: dict[str, GPTModel] = {}
+    for spec in specs:
+        op, sep, path = spec.partition("=")
+        if not sep or op not in OPS:  # plain PATH (which may itself contain "=")
+            op, path = "", spec
+        if not Path(path).exists():
+            sys.exit(f"{path} not found: pass --teacher")
+        model = load_model(path)
+        for o in [op] if op else ops:
+            teachers[o] = model
+    if missing := [o for o in ops if o not in teachers]:
+        sys.exit(f"no --teacher for op(s) {','.join(missing)}")
+    return {o: teachers[o] for o in ops}
+
+
 def cmd_opd(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
-    teacher_path = Path(args.teacher)
-    if not teacher_path.exists():
-        sys.exit(f"{teacher_path} not found: pass --teacher")
-    teacher = load_model(teacher_path)
+    teachers = load_teachers(args.teacher or [str(GRPO_CKPT)], args.ops)
+    ref = next(iter(teachers.values()))
     if args.student_config:
         d_model, num_layers, num_heads = (int(v) for v in args.student_config.split(","))
         student = GPTModel(
             GPTConfig(
-                vocab_size=teacher.config.vocab_size,
-                context_length=teacher.config.context_length,
+                vocab_size=ref.config.vocab_size,
+                context_length=ref.config.context_length,
                 d_model=d_model,
                 num_layers=num_layers,
                 num_heads=num_heads,
@@ -448,12 +477,12 @@ def cmd_opd(args: argparse.Namespace) -> None:
             sys.exit(f"{student_path} not found: pass --student or --student-config")
         student = load_model(student_path)
     mode = "off-policy SFT on teacher samples" if args.off_policy else f"on-policy {args.kl} KL"
-    print(f"device={device} {mode} teacher={args.teacher}")
-    n_student, n_teacher = count_parameters(student), count_parameters(teacher)
-    print(f"params: student {n_student:,}, teacher {n_teacher:,}")
+    print(f"device={device} {mode} ops={','.join(args.ops)} teacher={args.teacher}")
+    n_teachers = ", ".join(f"{op} {count_parameters(m):,}" for op, m in teachers.items())
+    print(f"params: student {count_parameters(student):,}, teachers {n_teachers}")
     res = train_opd(
         student,
-        teacher,
+        teachers,
         steps=args.steps,
         batch_size=args.batch_size,
         group=args.group,
@@ -467,13 +496,17 @@ def cmd_opd(args: argparse.Namespace) -> None:
         eval_tasks=args.eval_tasks,
         seed=args.seed,
         device=device,
+        ops=args.ops,
     )
     for row in res["history"]:
-        print(
+        line = (
             f"step {int(row['step'])} train_loss {row['loss']:.4f} "
             f"reverse_kl/token {row['kl']:.4f} greedy_acc {row['accuracy']:.3f} "
             f"mean_len {row['mean_len']:.1f}"
         )
+        if len(args.ops) > 1:
+            line += " | " + " ".join(f"{k} {v:.3f}" for k, v in row.items() if "[" in k)
+        print(line)
     out = Path(args.out or (OPD_OFF_POLICY_CKPT if args.off_policy else OPD_CKPT))
     save_checkpoint(out, student, None, step=args.steps, val_loss=res["final_kl"])
     print(f"checkpoint -> {out}")
@@ -895,16 +928,23 @@ def format_reasoning(res: dict[str, Any]) -> str:
         f"overall:  accuracy {res['accuracy']:.3f}  format {res['format']:.3f}  "
         f"tokens {res['mean_tokens']:.1f}  think {res['think_tokens']:.1f}"
     )
+    if len(res["per_op"]) > 1:
+        rows += [f"op {op}: accuracy {acc:.3f}" for op, acc in res["per_op"].items()]
     return "\n".join(rows)
 
 
 def report_reasoning(
-    model: GPTModel, tok: BPETokenizer, n: int, seed: int, efforts: tuple[int, ...]
+    model: GPTModel,
+    tok: BPETokenizer,
+    n: int,
+    seed: int,
+    efforts: tuple[int, ...],
+    ops: tuple[str, ...] = ("+",),
 ) -> str:
     """Greedy report on the fixed tasks, one block per effort level (one plain block if none)."""
     blocks = []
     for b in efforts or (None,):
-        res = format_reasoning(evaluate_reasoning(model, tok, n, seed, effort=b))
+        res = format_reasoning(evaluate_reasoning(model, tok, n, seed, effort=b, ops=ops))
         blocks.append(res if b is None else f"effort {b}:\n{res}")
     return "\n".join(blocks)
 
@@ -914,8 +954,8 @@ def cmd_reason_pretrain(args: argparse.Namespace) -> None:
     device = get_device()
     tok = reasoning_tokenizer()
     rng = random.Random(args.seed)
-    train_ids = tok.encode(equation_corpus(rng, args.corpus_size, 4))
-    val_ids = tok.encode(equation_corpus(rng, max(1, args.corpus_size // 25), 4))
+    train_ids = tok.encode(equation_corpus(rng, args.corpus_size, 4, args.ops))
+    val_ids = tok.encode(equation_corpus(rng, max(1, args.corpus_size // 25), 4, args.ops))
     cfg = GPTConfig(
         vocab_size=tok.vocab_size,
         context_length=args.context_length,
@@ -955,8 +995,9 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     tok = reasoning_tokenizer()
     model = load_model(require(Path(args.base), "reason-pretrain"))
     rng = random.Random(args.seed + 1000)  # apart from the fixed tasks of `reason-eval`
-    tasks = [make_task(rng, rng.randint(1, args.max_digits)) for _ in range(args.n)]
-    print(f"device={device} traces={len(tasks)} digits=1-{args.max_digits}")
+    tasks = [sample_task(rng, rng.randint(1, args.max_digits), args.ops) for _ in range(args.n)]
+    ops = ",".join(args.ops)
+    print(f"device={device} traces={len(tasks)} digits=1-{args.max_digits} ops={ops}")
     res = train_sft(
         model,
         sft_trace_dataset(tasks, tok, args.efforts, args.nothink_frac, args.seed),
@@ -975,7 +1016,7 @@ def cmd_reason_eval(args: argparse.Namespace) -> None:
     device = get_device()
     model = load_model(require(Path(args.checkpoint), "reason-sft")).to(device)
     tok = reasoning_tokenizer()
-    print(report_reasoning(model, tok, args.n, args.seed, args.efforts))
+    print(report_reasoning(model, tok, args.n, args.seed, args.efforts, args.ops))
 
 
 def run_grpo(
@@ -1021,6 +1062,7 @@ def run_grpo(
         efforts=args.efforts,
         effort_k0=args.effort_k0,
         reward_fn=reward_fn,
+        ops=args.ops,
         observe=observe,
         on_step=log,
         seed=args.seed,
@@ -1030,9 +1072,9 @@ def run_grpo(
     save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
     (out.parent / "history.json").write_text(json.dumps(res["history"]), encoding="utf-8")
     print("greedy on fixed tasks, SFT start:")
-    print(report_reasoning(ref, tok, args.eval_n, 0, args.efforts))
+    print(report_reasoning(ref, tok, args.eval_n, 0, args.efforts, args.ops))
     print("greedy on fixed tasks, after RL:")
-    print(report_reasoning(policy, tok, args.eval_n, 0, args.efforts))
+    print(report_reasoning(policy, tok, args.eval_n, 0, args.efforts, args.ops))
     print(f"checkpoint -> {out}")
     history: list[dict[str, float]] = res["history"]
     return history
@@ -1102,6 +1144,7 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
     s.add_argument("--out", default=str(out))
 
 
@@ -1209,7 +1252,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_dpo)
 
     s = sub.add_parser("opd", help="distil a teacher into a smaller student, on-policy")
-    s.add_argument("--teacher", default=str(GRPO_CKPT))
+    s.add_argument(
+        "--teacher",
+        action="append",
+        help="OP=PATH (one teacher per op) or PATH (one teacher for every op); repeatable; "
+        f"default {GRPO_CKPT}",
+    )
     s.add_argument("--student", default=str(REASON_SFT_CKPT), help="student init checkpoint")
     s.add_argument(
         "--student-config",
@@ -1237,6 +1285,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--eval-every", type=int, default=25)
     s.add_argument("--eval-tasks", type=int, default=64)
     s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
     s.add_argument("--out", default=None, help=f"default {OPD_CKPT} ({OPD_OFF_POLICY_CKPT} off)")
     s.set_defaults(func=cmd_opd)
 
@@ -1342,6 +1391,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lr", type=float, default=1e-3)
     s.add_argument("--eval-interval", type=int, default=250)
     s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
     s.set_defaults(func=cmd_reason_pretrain)
 
     s = sub.add_parser("reason-sft", help="cold-start SFT on reference chain-of-thought traces")
@@ -1364,11 +1414,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--batch-size", type=int, default=16)
     s.add_argument("--lr", type=float, default=5e-4)
     s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
     s.add_argument("--out", default=str(REASON_SFT_CKPT))
     s.set_defaults(func=cmd_reason_sft)
 
     s = sub.add_parser("reason-eval", help="greedy accuracy / format / length, 1-5 digits")
     s.add_argument("--checkpoint", default=str(REASON_SFT_CKPT))
+    add_ops_arg(s)
     s.add_argument("--n", type=int, default=50, help="tasks per digit count")
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--efforts", type=parse_efforts, default=(), help="comma list, e.g. 1,9")

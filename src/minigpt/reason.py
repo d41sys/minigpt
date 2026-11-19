@@ -1,10 +1,11 @@
 """Verifiable reasoning tasks and the rollout helpers shared by every RL stage.
 
-The task is multi-digit addition. A completion has the form
-`<think>7+5+0=12 4+8+1=13</think><answer>132</answer>`: one step per column, right to left,
-with the carry. A program checks the answer, so the reward needs no learned model. This is
-"RL with verifiable rewards", the setup behind DeepSeek-R1 and the synthesized, verifiable
-tasks of DeepSeek-V4.1's post-training.
+The tasks are multi-digit addition and subtraction (`a-b` with a >= b, so no negative answers). A
+completion has the form `<think>7+5+0=12 4+8+1=13</think><answer>132</answer>`: one step per
+column, right to left, with the carry (for `-`: `x-y-borrow=s`, where s may be negative, the digit
+is s mod 10 and the next borrow is 1 when s < 0). A program checks the answer, so the reward
+needs no learned model. This is "RL with verifiable rewards", the setup behind DeepSeek-R1 and the
+synthesized, verifiable tasks of DeepSeek-V4.1's post-training.
 
 Digits are tokenized one byte each (`reasoning_tokenizer`): BPE merges like "12" or "345"
 would hide the column structure the model has to learn.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import random
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,48 +30,59 @@ from minigpt.sft import SFTDataset
 ANSWER_RE = re.compile(r"<answer>(\d+)</answer>")
 FORMAT_RE = re.compile(r"<think>[^<]*</think><answer>\d+</answer>")
 THINK_RE = re.compile(r"<think>([^<]*)")
+OPS = ("+", "-")
 
 
 @dataclass(frozen=True)
 class Task:
-    """One addition problem `a + b`."""
+    """One problem `a + b` or `a - b` (with a >= b, so the answer is never negative)."""
 
     a: int
     b: int
+    op: str = "+"
 
     @property
     def prompt(self) -> str:
-        return f"{self.a}+{self.b}="
+        return f"{self.a}{self.op}{self.b}="
 
     @property
     def answer(self) -> str:
-        return str(self.a + self.b)
+        return str(self.a + self.b if self.op == "+" else self.a - self.b)
 
     def solution(self) -> str:
-        """Reference completion: column-wise steps with carries, then the answer."""
+        """Reference completion: column-wise steps with carries (borrows), then the answer."""
         xs, ys = str(self.a)[::-1], str(self.b)[::-1]
+        add = self.op == "+"
         carry, steps = 0, list[str]()
         for i in range(max(len(xs), len(ys))):
             x = int(xs[i]) if i < len(xs) else 0
             y = int(ys[i]) if i < len(ys) else 0
-            s = x + y + carry
-            steps.append(f"{x}+{y}+{carry}={s}")
-            carry = s // 10
+            s = x + y + carry if add else x - y - carry
+            steps.append(f"{x}{self.op}{y}{self.op}{carry}={s}")
+            carry = s // 10 if add else int(s < 0)
         return f"<think>{' '.join(steps)}</think><answer>{self.answer}</answer>"
 
 
-def make_task(rng: random.Random, digits: int) -> Task:
+def make_task(rng: random.Random, digits: int, op: str = "+") -> Task:
     """Sample a task whose operands both have exactly `digits` digits (0-9 when digits=1)."""
     lo = 0 if digits == 1 else 10 ** (digits - 1)
     hi = 10**digits - 1
-    return Task(rng.randint(lo, hi), rng.randint(lo, hi))
+    a, b = rng.randint(lo, hi), rng.randint(lo, hi)
+    if op == "-" and a < b:
+        a, b = b, a
+    return Task(a, b, op)
 
 
-def equation_corpus(rng: random.Random, n: int, max_digits: int) -> str:
-    """Pretraining text: bare equations `a+b=c`, one per line, no reasoning traces."""
+def sample_task(rng: random.Random, digits: int, ops: Sequence[str] = "+") -> Task:
+    """`make_task` with the operator drawn uniformly from `ops` (no RNG draw for a single one)."""
+    return make_task(rng, digits, ops[0] if len(ops) == 1 else rng.choice(ops))
+
+
+def equation_corpus(rng: random.Random, n: int, max_digits: int, ops: Sequence[str] = "+") -> str:
+    """Pretraining text: bare equations `a+b=c` (or `a-b=c`), one per line, no reasoning traces."""
     lines: list[str] = []
     for _ in range(n):
-        t = make_task(rng, rng.randint(1, max_digits))
+        t = sample_task(rng, rng.randint(1, max_digits), ops)
         lines.append(f"{t.prompt}{t.answer}")
     return "\n".join(lines) + "\n"
 
@@ -198,19 +211,22 @@ def evaluate_reasoning(
     seed: int = 0,
     max_new_tokens: int = 100,
     effort: int | None = None,
+    ops: Sequence[str] = "+",
 ) -> dict[str, Any]:
     """Greedy accuracy, format rate and mean completion tokens (EOS included) on fixed tasks.
 
-    `n_per_digit` tasks for each digit count 1-5, drawn from `Random(seed)`, so every model is
-    scored on the same tasks. With `effort`, every prompt carries its prefix. Returns the overall
-    means plus `per_digit[d]`; `think_tokens` counts only reasoning tokens.
+    `n_per_digit` tasks for each digit count 1-5, drawn from `Random(seed)` with the operator
+    drawn from `ops`, so every model is scored on the same tasks. With `effort`, every prompt
+    carries its prefix. Returns the overall means plus `per_digit[d]` and `per_op[op]` (accuracy
+    over all digit counts); `think_tokens` counts only reasoning tokens.
     """
     rng = random.Random(seed)
     device = next(model.parameters()).device
     eos = tok.eos_token_id
     per_digit: dict[int, dict[str, float]] = {}
+    by_op: dict[str, list[float]] = {op: [] for op in ops}
     for d in range(1, 6):
-        tasks = [make_task(rng, d) for _ in range(n_per_digit)]
+        tasks = [sample_task(rng, d, ops) for _ in range(n_per_digit)]
         # Both operands have d digits, so every prompt of this group has the same length.
         prefix = effort_prefix(effort)
         x = torch.tensor(
@@ -220,6 +236,8 @@ def evaluate_reasoning(
         rows = [r[: r.index(eos) + 1] if eos in r else r for r in out[:, x.size(1) :].tolist()]
         texts = [decode_completion(tok, r) for r in rows]
         correct = [accuracy_reward(t, s) for t, s in zip(tasks, texts, strict=True)]
+        for t, c in zip(tasks, correct, strict=True):
+            by_op[t.op].append(c)
         per_digit[d] = {
             "accuracy": sum(correct) / n_per_digit,
             "format": sum(format_reward(s) for s in texts) / n_per_digit,
@@ -227,4 +245,5 @@ def evaluate_reasoning(
             "think_tokens": sum(think_tokens(s) for s in texts) / n_per_digit,
         }
     overall = {k: sum(v[k] for v in per_digit.values()) / len(per_digit) for k in per_digit[1]}
-    return {**overall, "per_digit": per_digit}
+    per_op = {op: sum(v) / max(1, len(v)) for op, v in by_op.items()}
+    return {**overall, "per_digit": per_digit, "per_op": per_op}
