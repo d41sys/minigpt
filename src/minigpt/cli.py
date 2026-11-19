@@ -12,6 +12,7 @@ Reasoning track (addition with chain of thought): `reason-pretrain` -> `reason-s
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import sys
@@ -65,13 +66,22 @@ from minigpt.finetune_cls import (
     split_data,
     train_classifier,
 )
-from minigpt.grpo import RewardFn, Samples, default_reward, train_grpo
+from minigpt.grpo import (
+    RewardFn,
+    Samples,
+    default_reward,
+    estimate_budgets,
+    make_shaper,
+    train_grpo,
+)
 from minigpt.model import GPTConfig, GPTModel, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
 from minigpt.reason import (
     OPS,
+    Task,
+    accuracy_reward,
     equation_corpus,
     evaluate_reasoning,
     make_task,
@@ -79,6 +89,7 @@ from minigpt.reason import (
     sample_task,
     sft_trace_dataset,
 )
+from minigpt.rft import preference_pairs, rft_dataset, rm_scores, sample_tasks
 from minigpt.rlhf import (
     label_ranked_pairs,
     load_reward_model,
@@ -1023,6 +1034,11 @@ def cmd_reason_eval(args: argparse.Namespace) -> None:
     print(report_reasoning(model, tok, args.n, args.seed, args.efforts, args.ops))
 
 
+def parse_floats(s: str) -> tuple[float, ...]:
+    """`--budget-tau 1.5,1.0` -> (1.5, 1.0); the empty string means off."""
+    return tuple(float(x) for x in s.split(",")) if s else ()
+
+
 def run_grpo(
     args: argparse.Namespace,
     reward_fn: RewardFn,
@@ -1036,7 +1052,36 @@ def run_grpo(
     ref = load_model(args.base)
     print(
         f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm} "
-        f"unbiased_kl={args.unbiased_kl} fill_batch={args.fill_batch}"
+        f"unbiased_kl={args.unbiased_kl} fill_batch={args.fill_batch} "
+        f"policy_loss={args.policy_loss} advantage={args.advantage} "
+        f"clip=[{args.clip_eps},{args.clip_eps_high}] beta={args.beta} mu={args.mu} "
+        f"ref_reset_every={args.ref_reset_every}"
+    )
+    budgets = None
+    if args.budget_tau:
+        budgets = estimate_budgets(
+            ref.to(device).eval(),
+            tok,
+            (args.min_digits, args.max_digits),
+            args.efforts,
+            args.ops,
+            8,
+            args.group,
+            args.max_new_tokens,
+            args.temperature,
+            args.seed,
+        )
+        shown = {k: round(v, 1) for k, v in budgets.items()}
+        print(f"budgets b0 (effort, digits) in think tokens: {shown}")
+        seed_everything(args.seed)  # same rollout stream as a run without budgets
+    shaper = make_shaper(
+        args.steps,
+        args.max_new_tokens,
+        budgets,
+        args.budget_tau or (1.0,),
+        args.length_reward,
+        args.length_warmup,
+        args.overlong_cache,
     )
 
     def log(rec: dict[str, float]) -> None:
@@ -1065,8 +1110,13 @@ def run_grpo(
         fill_batch=args.fill_batch,
         efforts=args.efforts,
         effort_k0=args.effort_k0,
+        shape=shaper,
         reward_fn=reward_fn,
         ops=args.ops,
+        policy_loss=args.policy_loss,
+        clip_eps_high=args.clip_eps_high,
+        advantage=args.advantage,
+        ref_reset_every=args.ref_reset_every,
         observe=observe,
         on_step=log,
         seed=args.seed,
@@ -1123,9 +1173,10 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
     )
     s.add_argument(
         "--loss-agg",
-        choices=["seq-mean", "token-sum"],
+        choices=["seq-mean", "token-sum", "token-mean", "group-mean"],
         default="seq-mean",
-        help="per-sequence token mean (GRPO) or sum over a constant max length (Dr. GRPO)",
+        help="per-sequence token mean (GRPO), sum over a constant max length (Dr. GRPO), "
+        "total-token mean over the batch (DAPO, CISPO) or over each group (Magistral)",
     )
     s.add_argument(
         "--unbiased-kl",
@@ -1145,11 +1196,159 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         "penalty decaying with the level (DeepSeek-V4.1 reasoning effort)",
     )
     s.add_argument("--effort-k0", type=float, default=0.5, help="length penalty at the lowest b")
+    s.add_argument(
+        "--budget-tau",
+        type=parse_floats,
+        default=(),
+        help="comma list of budget multipliers, one per equal stage of --steps, e.g. 1.5,1.0: "
+        "a sample with more think tokens than tau * b0 (the SFT model's mean for that digit "
+        "count) gets reward -1, even if correct (Kimi K3 reasoning-effort RL)",
+    )
+    s.add_argument(
+        "--length-reward",
+        type=float,
+        default=0.0,
+        help="weight of the in-group length reward for correct/wrong answers (Kimi K1.5 2.3.3)",
+    )
+    s.add_argument(
+        "--length-warmup", type=int, default=0, help="steps without --length-reward (Kimi K1.5)"
+    )
+    s.add_argument(
+        "--overlong-cache",
+        type=int,
+        default=0,
+        help="soft overlong penalty over the last N of --max-new-tokens, -1 at the cap (DAPO 3.4)",
+    )
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--policy-loss",
+        choices=["ppo", "gspo", "cispo"],
+        default="ppo",
+        help="surrogate: per-token PPO clip (GRPO), sequence-level ratio (GSPO) or "
+        "stop-gradient clipped IS weight (CISPO)",
+    )
+    s.add_argument(
+        "--clip-eps-high",
+        type=float,
+        default=None,
+        help="upper clip range, default --clip-eps (DAPO/Magistral clip-higher: 0.28)",
+    )
+    s.add_argument(
+        "--advantage",
+        choices=["group", "batch", "rloo"],
+        default="group",
+        help="group: (r - mean)/std (--no-std-norm drops the std); batch: group-centred, "
+        "divided by the batch std (Magistral); rloo: r_i - mean of the others, no std",
+    )
+    s.add_argument(
+        "--ref-reset-every",
+        type=int,
+        default=0,
+        help="every N steps set the KL reference to the current policy and reset the "
+        "optimizer (ProRL); 0 = never",
+    )
     add_ops_arg(s)
     s.add_argument("--out", default=str(out))
+
+
+def draw_tasks(args: argparse.Namespace, rng: random.Random) -> list[Task]:
+    digits = range(args.min_digits, args.max_digits + 1)
+    return [sample_task(rng, rng.choice(digits), args.ops) for _ in range(args.tasks)]
+
+
+def cmd_reason_rft(args: argparse.Namespace) -> None:
+    """Per round: sample K per task, select (verifier or RM best-of-K), SFT. Best round seeds on."""
+    if args.sampler and args.rounds > 1:
+        sys.exit("--sampler is a fixed teacher: use --rounds 1")
+    if args.select == "rm" and not args.rm:
+        sys.exit("--select rm needs --rm CHECKPOINT")
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    model = load_model(require(Path(args.base), "reason-sft")).to(device)
+    teacher = load_model(require(Path(args.sampler), "grpo")).to(device) if args.sampler else None
+    rm = None
+    if args.select == "rm":
+        rm = load_reward_model(require(Path(args.rm), "reward-model")).to(device).eval()
+    check_rollout_fits(model, args.max_digits, args.max_new_tokens)
+    rng = random.Random(args.seed + 2000)
+    best_acc, best_state = -1.0, dict[str, Any]()
+    for r in range(1, args.rounds + 1):
+        samples = sample_tasks(
+            teacher or model,
+            tok,
+            draw_tasks(args, rng),
+            args.k,
+            args.max_new_tokens,
+            args.temperature,
+        )
+        scores = rm_scores(rm, samples, device) if rm is not None else None
+        data, st = rft_dataset(tok, samples, scores, args.keep)
+        if not len(data):
+            sys.exit("no sample was selected: the sampler never solves a task")
+        print(
+            f"round {r}: sample accuracy {st['sample_accuracy']:.3f} kept {int(st['kept'])} "
+            f"(verifier-correct {st['precision']:.3f}) select={args.select}"
+        )
+        res = train_sft(model, data, args.epochs, args.batch_size, args.lr, device=device)
+        model.eval()
+        acc = evaluate_reasoning(model, tok, args.eval_n, 1, ops=args.ops)["accuracy"]
+        print(f"round {r}: sft loss {res['final_loss']:.4f} greedy accuracy (seed 1) {acc:.3f}")
+        if acc >= best_acc:
+            best_acc, best_state = acc, copy.deepcopy(model.state_dict())
+        else:
+            model.load_state_dict(best_state)
+            print(f"round {r} is worse than the best so far: it does not seed the next round")
+    model.load_state_dict(best_state)
+    save_checkpoint(Path(args.out), model, None, step=args.rounds, val_loss=float("nan"))
+    print("greedy on fixed tasks:")
+    print(report_reasoning(model, tok, args.eval_n, 0, (), args.ops))
+    print(f"checkpoint -> {args.out}")
+
+
+def cmd_reason_dpo(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    policy = load_model(require(Path(args.base), "reason-sft"))
+    ref = load_model(args.base)
+    check_rollout_fits(policy, args.max_digits, args.max_new_tokens)
+    rng = random.Random(args.seed + 3000)
+    samples = sample_tasks(
+        ref.to(device), tok, draw_tasks(args, rng), args.k, args.max_new_tokens, args.temperature
+    )
+    ds = preference_pairs(tok, samples, args.seed)
+    acc = sum(accuracy_reward(s.task, t) for s in samples for t in s.texts)
+    print(
+        f"device={device} sample accuracy {acc / (len(samples) * args.k):.3f} "
+        f"pairs {len(ds)}/{len(samples)} tasks beta={args.beta} nll_alpha={args.nll_alpha}"
+    )
+    if not len(ds):
+        sys.exit("no task has both a better and a worse sample: nothing to prefer")
+    res = train_dpo(
+        policy,
+        ref,
+        ds,
+        beta=args.beta,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        device=device,
+        nll_alpha=args.nll_alpha,
+    )
+    for row in res["history"]:
+        print(
+            f"epoch {int(row['epoch'])} dpo_loss {row['dpo_loss']:.4f} "
+            f"reward_accuracy {row['reward_accuracy']:.3f} "
+            f"chosen {row['logp_chosen_vs_ref']:+.3f} rejected {row['logp_rejected_vs_ref']:+.3f}"
+        )
+    policy.eval()
+    save_checkpoint(Path(args.out), policy, None, step=args.epochs, val_loss=res["final_loss"])
+    print("greedy on fixed tasks:")
+    print(report_reasoning(policy, tok, args.eval_n, 0, (), args.ops))
+    print(f"checkpoint -> {args.out}")
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -1445,6 +1644,47 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")
     add_grpo_args(s, HACK_CKPT)
     s.set_defaults(func=cmd_hack_demo)
+
+    s = sub.add_parser("reason-rft", help="rejection-sampling fine-tuning / expert iteration")
+    s.add_argument("--base", default=str(REASON_SFT_CKPT), help="the model that is fine-tuned")
+    s.add_argument("--sampler", default=None, help="sample from this model instead (1 round)")
+    s.add_argument("--select", choices=["verifier", "rm"], default="verifier")
+    s.add_argument("--rm", default=None, help="reward model checkpoint for --select rm")
+    s.add_argument("--rounds", type=int, default=1, help="the best round seeds the next")
+    s.add_argument("--tasks", type=int, default=2000, help="tasks sampled per round")
+    s.add_argument("--k", type=int, default=8, help="completions per task")
+    s.add_argument("--keep", type=int, default=2, help="distinct completions kept per task")
+    s.add_argument("--min-digits", type=int, default=1)
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--epochs", type=int, default=2)
+    s.add_argument("--batch-size", type=int, default=16)
+    s.add_argument("--lr", type=float, default=5e-5)
+    s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
+    s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
+    s.add_argument("--out", required=True)
+    s.set_defaults(func=cmd_reason_rft)
+
+    s = sub.add_parser("reason-dpo", help="DPO on (correct, incorrect) pairs of own samples")
+    s.add_argument("--base", default=str(REASON_SFT_CKPT), help="policy and DPO reference")
+    s.add_argument("--tasks", type=int, default=2000, help="tasks sampled")
+    s.add_argument("--k", type=int, default=8, help="completions per task")
+    s.add_argument("--min-digits", type=int, default=1)
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--beta", type=float, default=0.1)
+    s.add_argument("--epochs", type=int, default=2)
+    s.add_argument("--batch-size", type=int, default=8)
+    s.add_argument("--lr", type=float, default=1e-5)
+    s.add_argument("--nll-alpha", type=float, default=0.2, help="Llama 3 uses 0.2")
+    s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
+    s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
+    s.add_argument("--out", required=True)
+    s.set_defaults(func=cmd_reason_dpo)
 
     s = sub.add_parser("generate", help="sample text")
     s.add_argument("--prompt", default="ROMEO:")
