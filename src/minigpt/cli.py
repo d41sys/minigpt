@@ -12,6 +12,7 @@ Reasoning track (addition with chain of thought): `reason-pretrain` -> `reason-s
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import sys
@@ -72,6 +73,8 @@ from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
 from minigpt.reason import (
     OPS,
+    Task,
+    accuracy_reward,
     equation_corpus,
     evaluate_reasoning,
     make_task,
@@ -79,6 +82,7 @@ from minigpt.reason import (
     sample_task,
     sft_trace_dataset,
 )
+from minigpt.rft import preference_pairs, rft_dataset, rm_scores, sample_tasks
 from minigpt.rlhf import (
     label_ranked_pairs,
     load_reward_model,
@@ -1148,6 +1152,104 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
     s.add_argument("--out", default=str(out))
 
 
+def draw_tasks(args: argparse.Namespace, rng: random.Random) -> list[Task]:
+    digits = range(args.min_digits, args.max_digits + 1)
+    return [sample_task(rng, rng.choice(digits), args.ops) for _ in range(args.tasks)]
+
+
+def cmd_reason_rft(args: argparse.Namespace) -> None:
+    """Per round: sample K per task, select (verifier or RM best-of-K), SFT. Best round seeds on."""
+    if args.sampler and args.rounds > 1:
+        sys.exit("--sampler is a fixed teacher: use --rounds 1")
+    if args.select == "rm" and not args.rm:
+        sys.exit("--select rm needs --rm CHECKPOINT")
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    model = load_model(require(Path(args.base), "reason-sft")).to(device)
+    teacher = load_model(require(Path(args.sampler), "grpo")).to(device) if args.sampler else None
+    rm = None
+    if args.select == "rm":
+        rm = load_reward_model(require(Path(args.rm), "reward-model")).to(device).eval()
+    check_rollout_fits(model, args.max_digits, args.max_new_tokens)
+    rng = random.Random(args.seed + 2000)
+    best_acc, best_state = -1.0, dict[str, Any]()
+    for r in range(1, args.rounds + 1):
+        samples = sample_tasks(
+            teacher or model,
+            tok,
+            draw_tasks(args, rng),
+            args.k,
+            args.max_new_tokens,
+            args.temperature,
+        )
+        scores = rm_scores(rm, samples, device) if rm is not None else None
+        data, st = rft_dataset(tok, samples, scores, args.keep)
+        if not len(data):
+            sys.exit("no sample was selected: the sampler never solves a task")
+        print(
+            f"round {r}: sample accuracy {st['sample_accuracy']:.3f} kept {int(st['kept'])} "
+            f"(verifier-correct {st['precision']:.3f}) select={args.select}"
+        )
+        res = train_sft(model, data, args.epochs, args.batch_size, args.lr, device=device)
+        model.eval()
+        acc = evaluate_reasoning(model, tok, args.eval_n, 1, ops=args.ops)["accuracy"]
+        print(f"round {r}: sft loss {res['final_loss']:.4f} greedy accuracy (seed 1) {acc:.3f}")
+        if acc >= best_acc:
+            best_acc, best_state = acc, copy.deepcopy(model.state_dict())
+        else:
+            model.load_state_dict(best_state)
+            print(f"round {r} is worse than the best so far: it does not seed the next round")
+    model.load_state_dict(best_state)
+    save_checkpoint(Path(args.out), model, None, step=args.rounds, val_loss=float("nan"))
+    print("greedy on fixed tasks:")
+    print(report_reasoning(model, tok, args.eval_n, 0, (), args.ops))
+    print(f"checkpoint -> {args.out}")
+
+
+def cmd_reason_dpo(args: argparse.Namespace) -> None:
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    policy = load_model(require(Path(args.base), "reason-sft"))
+    ref = load_model(args.base)
+    check_rollout_fits(policy, args.max_digits, args.max_new_tokens)
+    rng = random.Random(args.seed + 3000)
+    samples = sample_tasks(
+        ref.to(device), tok, draw_tasks(args, rng), args.k, args.max_new_tokens, args.temperature
+    )
+    ds = preference_pairs(tok, samples, args.seed)
+    acc = sum(accuracy_reward(s.task, t) for s in samples for t in s.texts)
+    print(
+        f"device={device} sample accuracy {acc / (len(samples) * args.k):.3f} "
+        f"pairs {len(ds)}/{len(samples)} tasks beta={args.beta} nll_alpha={args.nll_alpha}"
+    )
+    if not len(ds):
+        sys.exit("no task has both a better and a worse sample: nothing to prefer")
+    res = train_dpo(
+        policy,
+        ref,
+        ds,
+        beta=args.beta,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        device=device,
+        nll_alpha=args.nll_alpha,
+    )
+    for row in res["history"]:
+        print(
+            f"epoch {int(row['epoch'])} dpo_loss {row['dpo_loss']:.4f} "
+            f"reward_accuracy {row['reward_accuracy']:.3f} "
+            f"chosen {row['logp_chosen_vs_ref']:+.3f} rejected {row['logp_rejected_vs_ref']:+.3f}"
+        )
+    policy.eval()
+    save_checkpoint(Path(args.out), policy, None, step=args.epochs, val_loss=res["final_loss"])
+    print("greedy on fixed tasks:")
+    print(report_reasoning(policy, tok, args.eval_n, 0, (), args.ops))
+    print(f"checkpoint -> {args.out}")
+
+
 def cmd_generate(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
@@ -1433,6 +1535,47 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")
     add_grpo_args(s, HACK_CKPT)
     s.set_defaults(func=cmd_hack_demo)
+
+    s = sub.add_parser("reason-rft", help="rejection-sampling fine-tuning / expert iteration")
+    s.add_argument("--base", default=str(REASON_SFT_CKPT), help="the model that is fine-tuned")
+    s.add_argument("--sampler", default=None, help="sample from this model instead (1 round)")
+    s.add_argument("--select", choices=["verifier", "rm"], default="verifier")
+    s.add_argument("--rm", default=None, help="reward model checkpoint for --select rm")
+    s.add_argument("--rounds", type=int, default=1, help="the best round seeds the next")
+    s.add_argument("--tasks", type=int, default=2000, help="tasks sampled per round")
+    s.add_argument("--k", type=int, default=8, help="completions per task")
+    s.add_argument("--keep", type=int, default=2, help="distinct completions kept per task")
+    s.add_argument("--min-digits", type=int, default=1)
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--epochs", type=int, default=2)
+    s.add_argument("--batch-size", type=int, default=16)
+    s.add_argument("--lr", type=float, default=5e-5)
+    s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
+    s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
+    s.add_argument("--out", required=True)
+    s.set_defaults(func=cmd_reason_rft)
+
+    s = sub.add_parser("reason-dpo", help="DPO on (correct, incorrect) pairs of own samples")
+    s.add_argument("--base", default=str(REASON_SFT_CKPT), help="policy and DPO reference")
+    s.add_argument("--tasks", type=int, default=2000, help="tasks sampled")
+    s.add_argument("--k", type=int, default=8, help="completions per task")
+    s.add_argument("--min-digits", type=int, default=1)
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--beta", type=float, default=0.1)
+    s.add_argument("--epochs", type=int, default=2)
+    s.add_argument("--batch-size", type=int, default=8)
+    s.add_argument("--lr", type=float, default=1e-5)
+    s.add_argument("--nll-alpha", type=float, default=0.2, help="Llama 3 uses 0.2")
+    s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
+    s.add_argument("--seed", type=int, default=0)
+    add_ops_arg(s)
+    s.add_argument("--out", required=True)
+    s.set_defaults(func=cmd_reason_dpo)
 
     s = sub.add_parser("generate", help="sample text")
     s.add_argument("--prompt", default="ROMEO:")
