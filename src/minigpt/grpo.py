@@ -19,10 +19,15 @@ with a k3 KL penalty to the frozen SFT reference. Two choices follow the sources
   than one in a long sequence. `token-sum` divides by one constant (the max completion length,
   Dr. GRPO), so every token weighs the same. `std_norm=False` is the other Dr. GRPO fix: no
   per-group std division, which over-weights groups with tiny reward spread.
+- Controllable effort (DeepSeek-V4.1 section 5.1.4, `efforts`): every task is sampled once per
+  effort level b with `e{b}:` in the prompt. Each (task, b) is its own group, so advantages are
+  centred within it and levels are never compared; a length penalty on the reasoning tokens,
+  whose coefficient k(b) decays with b, is what makes low effort think less.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable
 from typing import Any
@@ -36,15 +41,36 @@ from minigpt.reason import (
     accuracy_reward,
     build_batch,
     decode_completion,
+    effort_prefix,
     format_reward,
     make_task,
     per_token_log_probs,
     sample_group,
+    think_tokens,
 )
 from minigpt.train import configure_optimizers, get_device
 
 RewardFn = Callable[[Task, str], float]
 Samples = list[tuple[Task, str]]
+
+# Penalty scale: a 3-digit trace is about 26 tokens, so one such trace at k=1 costs ~0.9.
+L_NORM = 30.0
+# Cap on the deduction, so a long trace never outweighs a correct answer (reward 1.1).
+C_MAX = 1.0
+# tau = LAMBDA * mean level spacing; a small tau makes the top level nearly penalty-free.
+LAMBDA = 0.25
+
+
+def effort_coef(effort: int, efforts: tuple[int, ...], k0: float) -> float:
+    """k(b) = k0 * exp(-(b - b_min) / tau), tau = LAMBDA * mean spacing of the training levels."""
+    levels = sorted(set(efforts))
+    spacing = (levels[-1] - levels[0]) / (len(levels) - 1) if len(levels) > 1 else 1.0
+    return k0 * math.exp(-(effort - levels[0]) / (LAMBDA * spacing))
+
+
+def length_penalty(completion: str, k: float) -> float:
+    """r_len = -min(C_MAX, k * think_tokens / L_NORM)."""
+    return -min(C_MAX, k * think_tokens(completion) / L_NORM)
 
 
 def default_reward(task: Task, completion: str) -> float:
@@ -165,6 +191,8 @@ def train_grpo(
     unbiased_kl: bool = False,
     fill_batch: bool = False,
     max_rounds: int = 4,
+    efforts: tuple[int, ...] = (),
+    effort_k0: float = 0.5,
     reward_fn: RewardFn = default_reward,
     observe: Callable[[Samples], dict[str, float]] | None = None,
     on_step: Callable[[dict[str, float]], None] | None = None,
@@ -180,9 +208,17 @@ def train_grpo(
     `tasks_per_step` groups survive; `tasks_sampled` counts them. Stats cover
     every sample, dropped groups included. `observe` sees all `(task, completion)` pairs of the
     step and its returned dict is merged into the record.
+
+    With `efforts`, each task yields one group per level, `reward` includes the length penalty
+    `length_penalty(., effort_coef(b, efforts, effort_k0))`, `tasks_per_step` still counts tasks
+    (so `tasks_per_step * len(efforts)` groups), and the record adds `think_e{b}` (mean think
+    tokens) and `acc_e{b}` per level.
     """
-    if 2 * digits[1] + 2 + max_new_tokens > policy.config.context_length:
+    levels: tuple[int | None, ...] = efforts or (None,)
+    prefix_len = max(len(effort_prefix(b)) for b in levels)
+    if 2 * digits[1] + 2 + prefix_len + max_new_tokens > policy.config.context_length:
         raise ValueError("longest prompt + max_new_tokens exceeds the context length")
+    ks = {b: effort_coef(b, efforts, effort_k0) for b in efforts}
     device = device or get_device()
     policy.to(device)
     ref.to(device).eval()
@@ -192,30 +228,37 @@ def train_grpo(
     eos, pad = tok.eos_token_id, tok.special_to_id["<|pad|>"]
     history: list[dict[str, float]] = []
     for step in range(steps):
-        tasks: list[Task] = []
+        entries: list[tuple[Task, int | None]] = []  # one per group: (task, effort)
         prompts: list[list[int]] = []
         groups: list[list[list[int]]] = []
         texts: list[list[str]] = []
         for _ in range(max_rounds if fill_batch else 1):
-            new = [make_task(rng, rng.randint(*digits)) for _ in range(tasks_per_step)]
-            new_prompts = [tok.encode(t.prompt) for t in new]
+            new_tasks = [make_task(rng, rng.randint(*digits)) for _ in range(tasks_per_step)]
+            new = [(t, b) for t in new_tasks for b in levels]
+            new_prompts = [tok.encode(effort_prefix(b) + t.prompt) for t, b in new]
             new_groups = [
                 sample_group(policy, p, group_size, max_new_tokens, eos, temperature)
                 for p in new_prompts
             ]
-            tasks += new
+            entries += new
             prompts += new_prompts
             groups += new_groups
             texts += [[decode_completion(tok, c) for c in g] for g in new_groups]
             rewards = torch.tensor(
-                [[reward_fn(t, s) for s in g] for t, g in zip(tasks, texts, strict=True)]
+                [
+                    [
+                        reward_fn(t, s) + (0.0 if b is None else length_penalty(s, ks[b]))
+                        for s in g
+                    ]
+                    for (t, b), g in zip(entries, texts, strict=True)
+                ]
             )
             # All-equal rewards give zero advantage: nothing to learn, so drop the group.
             spread = rewards.max(dim=1).values > rewards.min(dim=1).values
             kept = spread.nonzero().flatten().tolist()
-            if len(kept) >= tasks_per_step:
+            if len(kept) >= tasks_per_step * len(levels):
                 break
-        kept = kept[:tasks_per_step]
+        kept = kept[: tasks_per_step * len(levels)]
         kl = 0.0
         if kept:
             kl = grpo_step(
@@ -234,7 +277,7 @@ def train_grpo(
                 max_new_tokens,
                 unbiased_kl,
             )
-        samples: Samples = [(t, s) for t, g in zip(tasks, texts, strict=True) for s in g]
+        samples: Samples = [(t, s) for (t, _), g in zip(entries, texts, strict=True) for s in g]
         n = len(samples)
         record = {
             "step": float(step),
@@ -244,8 +287,12 @@ def train_grpo(
             "length": sum(len(c) for g in groups for c in g) / n,
             "kl": kl,
             "drop_rate": 1 - spread.float().mean().item(),
-            "tasks_sampled": float(len(tasks)),
+            "tasks_sampled": float(len(entries) // len(levels)),
         }
+        for b in efforts:
+            of_b = [(t, s) for (t, e), g in zip(entries, texts, strict=True) for s in g if e == b]
+            record[f"think_e{b}"] = sum(think_tokens(s) for _, s in of_b) / len(of_b)
+            record[f"acc_e{b}"] = sum(accuracy_reward(t, s) for t, s in of_b) / len(of_b)
         if observe is not None:
             record.update(observe(samples))
         history.append(record)

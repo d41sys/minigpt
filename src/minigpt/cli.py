@@ -880,17 +880,33 @@ def cmd_eval(args: argparse.Namespace) -> None:
                 )
 
 
+def parse_efforts(s: str) -> tuple[int, ...]:
+    """`--efforts 1,9` -> (1, 9); the empty string means no effort conditioning."""
+    return tuple(int(x) for x in s.split(",")) if s else ()
+
+
 def format_reasoning(res: dict[str, Any]) -> str:
     rows = [
         f"{d} digits: accuracy {m['accuracy']:.3f}  format {m['format']:.3f}  "
-        f"tokens {m['mean_tokens']:.1f}"
+        f"tokens {m['mean_tokens']:.1f}  think {m['think_tokens']:.1f}"
         for d, m in res["per_digit"].items()
     ]
     rows.append(
         f"overall:  accuracy {res['accuracy']:.3f}  format {res['format']:.3f}  "
-        f"tokens {res['mean_tokens']:.1f}"
+        f"tokens {res['mean_tokens']:.1f}  think {res['think_tokens']:.1f}"
     )
     return "\n".join(rows)
+
+
+def report_reasoning(
+    model: GPTModel, tok: BPETokenizer, n: int, seed: int, efforts: tuple[int, ...]
+) -> str:
+    """Greedy report on the fixed tasks, one block per effort level (one plain block if none)."""
+    blocks = []
+    for b in efforts or (None,):
+        res = format_reasoning(evaluate_reasoning(model, tok, n, seed, effort=b))
+        blocks.append(res if b is None else f"effort {b}:\n{res}")
+    return "\n".join(blocks)
 
 
 def cmd_reason_pretrain(args: argparse.Namespace) -> None:
@@ -943,7 +959,7 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     print(f"device={device} traces={len(tasks)} digits=1-{args.max_digits}")
     res = train_sft(
         model,
-        sft_trace_dataset(tasks, tok),
+        sft_trace_dataset(tasks, tok, args.efforts, args.nothink_frac, args.seed),
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
@@ -958,7 +974,8 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
 def cmd_reason_eval(args: argparse.Namespace) -> None:
     device = get_device()
     model = load_model(require(Path(args.checkpoint), "reason-sft")).to(device)
-    print(format_reasoning(evaluate_reasoning(model, reasoning_tokenizer(), args.n, args.seed)))
+    tok = reasoning_tokenizer()
+    print(report_reasoning(model, tok, args.n, args.seed, args.efforts))
 
 
 def run_grpo(
@@ -1001,6 +1018,8 @@ def run_grpo(
         loss_agg=args.loss_agg,
         unbiased_kl=args.unbiased_kl,
         fill_batch=args.fill_batch,
+        efforts=args.efforts,
+        effort_k0=args.effort_k0,
         reward_fn=reward_fn,
         observe=observe,
         on_step=log,
@@ -1011,9 +1030,9 @@ def run_grpo(
     save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
     (out.parent / "history.json").write_text(json.dumps(res["history"]), encoding="utf-8")
     print("greedy on fixed tasks, SFT start:")
-    print(format_reasoning(evaluate_reasoning(ref, tok, args.eval_n)))
+    print(report_reasoning(ref, tok, args.eval_n, 0, args.efforts))
     print("greedy on fixed tasks, after RL:")
-    print(format_reasoning(evaluate_reasoning(policy, tok, args.eval_n)))
+    print(report_reasoning(policy, tok, args.eval_n, 0, args.efforts))
     print(f"checkpoint -> {out}")
     history: list[dict[str, float]] = res["history"]
     return history
@@ -1072,6 +1091,14 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         action="store_true",
         help="resample (up to 4 rounds) until --tasks groups have mixed rewards (DAPO)",
     )
+    s.add_argument(
+        "--efforts",
+        type=parse_efforts,
+        default=(),
+        help="comma list of effort levels, e.g. 1,9: one group per level per task, length "
+        "penalty decaying with the level (DeepSeek-V4.1 reasoning effort)",
+    )
+    s.add_argument("--effort-k0", type=float, default=0.5, help="length penalty at the lowest level")
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
@@ -1321,6 +1348,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--base", default=str(REASON_PRETRAIN_CKPT))
     s.add_argument("--n", type=int, default=20000, help="traces")
     s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument(
+        "--efforts",
+        type=parse_efforts,
+        default=(),
+        help="comma list of effort levels, e.g. 1,9: each trace gets a random `e<b>:` prefix",
+    )
+    s.add_argument(
+        "--nothink-frac",
+        type=float,
+        default=0.0,
+        help="share of traces with an empty think block, independent of the effort level",
+    )
     s.add_argument("--epochs", type=int, default=3)
     s.add_argument("--batch-size", type=int, default=16)
     s.add_argument("--lr", type=float, default=5e-4)
@@ -1332,6 +1371,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--checkpoint", default=str(REASON_SFT_CKPT))
     s.add_argument("--n", type=int, default=50, help="tasks per digit count")
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--efforts", type=parse_efforts, default=(), help="comma list, e.g. 1,9")
     s.set_defaults(func=cmd_reason_eval)
 
     s = sub.add_parser("grpo", help="GRPO on verifiable addition from the reasoning SFT model")
