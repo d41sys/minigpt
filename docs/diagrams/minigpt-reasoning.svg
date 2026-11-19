@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-reasoning-title minigpt-reasoning-desc" id="minigpt-reasoning-root">
+<title id="minigpt-reasoning-title">minigpt reasoning post-training</title>
+<desc id="minigpt-reasoning-desc">DeepSeek-style flow on verifiable arithmetic: pretraining on bare equations, cold-start SFT on think traces and GRPO give the addition teacher; a subtraction specialist is trained the same way; multi-teacher on-policy distillation merges both teachers into one weak mixed student.</desc>
+<defs>
+<style>
+#minigpt-reasoning-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
+#minigpt-reasoning-root .s { fill: #59636e; font-size: 9px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; }
+#minigpt-reasoning-root .leg { fill: #59636e; font-size: 9px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+#minigpt-reasoning-root .mask { fill: #ffffff; }
+#minigpt-reasoning-root .stage { fill: #ffffff; stroke: #1f2328; stroke-width: 1; }
+#minigpt-reasoning-root .data { fill: #1f2328; fill-opacity: 0.05; stroke: #59636e; stroke-width: 1; }
+#minigpt-reasoning-root .acc { fill: #0969da; fill-opacity: 0.08; stroke: #0969da; stroke-width: 1; }
+#minigpt-reasoning-root .a { fill: none; stroke: #59636e; stroke-width: 1.2; marker-end: url(#minigpt-reasoning-arrow); }
+#minigpt-reasoning-root .aa { fill: none; stroke: #0969da; stroke-width: 1.2; marker-end: url(#minigpt-reasoning-arrow-accent); }
+</style>
+<marker id="minigpt-reasoning-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#59636e"/></marker>
+<marker id="minigpt-reasoning-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<path class="a" d="M 160,76 L 192,76"/>
+<path class="a" d="M 312,76 L 344,76"/>
+<path class="a" d="M 464,76 L 496,76"/>
+<path class="a" d="M 616,76 H 700 Q 708,76 708,84 V 168"/>
+<path class="a" d="M 616,196 L 648,196"/>
+<path class="a" d="M 616,316 H 700 Q 708,316 708,308 V 224"/>
+<path class="aa" d="M 768,196 L 800,196"/>
+<rect class="mask" x="40" y="48" width="120" height="56" rx="6"/>
+<rect class="data" x="40" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="100" y="74">equations</text>
+<text class="s" x="100" y="90">a+b=c, generated</text>
+<rect class="stage" x="192" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="252" y="74">reason-pretrain</text>
+<text class="s" x="252" y="90">no traces</text>
+<rect class="stage" x="344" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="404" y="74">cold-start SFT</text>
+<text class="s" x="404" y="90">20k &lt;think&gt; traces</text>
+<rect class="stage" x="496" y="48" width="120" height="56" rx="6"/>
+<text class="n" x="556" y="74">GRPO</text>
+<text class="s" x="556" y="90">+ teacher, verifier</text>
+<rect class="stage" x="496" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="556" y="194">− specialist</text>
+<text class="s" x="556" y="210">same 3 stages, ops −</text>
+<rect class="stage" x="496" y="288" width="120" height="56" rx="6"/>
+<text class="n" x="556" y="314">student SFT</text>
+<text class="s" x="556" y="330">weak, mixed + and −</text>
+<rect class="mask" x="648" y="168" width="120" height="56" rx="6"/>
+<rect class="acc" x="648" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="708" y="194">MOPD</text>
+<text class="s" x="708" y="210">multi-teacher OPD</text>
+<rect class="stage" x="800" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="860" y="194">one student</text>
+<text class="s" x="860" y="210">+ and − in 1 model</text>
+<line x1="40" y1="372" x2="920" y2="372" stroke="#1f2328" stroke-width="0.8" stroke-opacity="0.10"/>
+<text x="40" y="392" fill="#59636e" font-size="8" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">LEGEND</text>
+<rect class="data" x="120" y="384" width="24" height="12" rx="2"/>
+<text class="leg" x="152" y="393">data</text>
+<rect class="stage" x="320" y="384" width="24" height="12" rx="2"/>
+<text class="leg" x="352" y="393">stage</text>
+<rect class="acc" x="520" y="384" width="24" height="12" rx="2"/>
+<text class="leg" x="552" y="393">distillation (merge)</text>
+</svg>

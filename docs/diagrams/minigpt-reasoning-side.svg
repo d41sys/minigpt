@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 352" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-reasoning-side-title minigpt-reasoning-side-desc" id="minigpt-reasoning-side-root">
+<title id="minigpt-reasoning-side-title">minigpt reasoning side experiments</title>
+<desc id="minigpt-reasoning-side-desc">From the reasoning base: GRPO against a lenient grader with a chain-of-thought monitor, a reward model optimized by PPO, and an effort-prefixed SFT followed by GRPO with an effort-dependent length penalty, each with its one-run result.</desc>
+<defs>
+<style>
+#minigpt-reasoning-side-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
+#minigpt-reasoning-side-root .s { fill: #59636e; font-size: 9px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; }
+#minigpt-reasoning-side-root .leg { fill: #59636e; font-size: 9px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+#minigpt-reasoning-side-root .mask { fill: #ffffff; }
+#minigpt-reasoning-side-root .stage { fill: #ffffff; stroke: #1f2328; stroke-width: 1; }
+#minigpt-reasoning-side-root .acc { fill: #0969da; fill-opacity: 0.08; stroke: #0969da; stroke-width: 1; }
+#minigpt-reasoning-side-root .a { fill: none; stroke: #59636e; stroke-width: 1.2; marker-end: url(#minigpt-reasoning-side-arrow); }
+#minigpt-reasoning-side-root .aa { fill: none; stroke: #0969da; stroke-width: 1.2; marker-end: url(#minigpt-reasoning-side-arrow-accent); }
+</style>
+<marker id="minigpt-reasoning-side-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#59636e"/></marker>
+<marker id="minigpt-reasoning-side-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<path class="a" d="M 208,156 H 228 Q 236,156 236,148 V 76 Q 236,68 244,68 H 264"/>
+<path class="a" d="M 208,172 H 228 Q 236,172 236,180 V 252 Q 236,260 244,260 H 264"/>
+<path class="a" d="M 432,60 L 488,60"/>
+<path class="a" d="M 432,76 H 452 Q 460,76 460,84 V 156 Q 460,164 468,164 H 488"/>
+<path class="a" d="M 432,260 L 488,260"/>
+<path class="a" d="M 656,68 L 712,68"/>
+<path class="aa" d="M 656,164 L 712,164"/>
+<rect class="stage" x="40" y="136" width="168" height="56" rx="6"/>
+<text class="n" x="124" y="162">reason-pretrain</text>
+<text class="s" x="124" y="178">bare equations</text>
+<rect class="stage" x="264" y="40" width="168" height="56" rx="6"/>
+<text class="n" x="348" y="66">cold-start SFT</text>
+<text class="s" x="348" y="82">20k traces, or 500 (weak)</text>
+<rect class="stage" x="264" y="232" width="168" height="56" rx="6"/>
+<text class="n" x="348" y="258">effort SFT</text>
+<text class="s" x="348" y="274">e1/e9 prefix, 30% no-think</text>
+<rect class="stage" x="488" y="40" width="168" height="56" rx="6"/>
+<text class="n" x="572" y="66">GRPO, lenient grader</text>
+<text class="s" x="572" y="82">hacks 0.08→0.20 (weak base)</text>
+<rect class="stage" x="488" y="136" width="168" height="56" rx="6"/>
+<text class="n" x="572" y="162">reward model</text>
+<text class="s" x="572" y="178">1,908 pairs, acc 0.83</text>
+<rect class="stage" x="488" y="232" width="168" height="56" rx="6"/>
+<text class="n" x="572" y="258">effort GRPO</text>
+<text class="s" x="572" y="274">length penalty k(b): no gap</text>
+<rect class="stage" x="712" y="40" width="168" height="56" rx="6"/>
+<text class="n" x="796" y="66">CoT monitor</text>
+<text class="s" x="796" y="82">recall 0.92, precision 0.04</text>
+<rect class="mask" x="712" y="136" width="168" height="56" rx="6"/>
+<rect class="acc" x="712" y="136" width="168" height="56" rx="6"/>
+<text class="n" x="796" y="162">PPO vs reward model</text>
+<text class="s" x="796" y="178">gold 0.73→0.00 at β=0.02</text>
+<line x1="40" y1="312" x2="920" y2="312" stroke="#1f2328" stroke-width="0.8" stroke-opacity="0.10"/>
+<text x="40" y="332" fill="#59636e" font-size="8" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">LEGEND</text>
+<rect class="stage" x="120" y="324" width="24" height="12" rx="2"/>
+<text class="leg" x="152" y="333">stage, with its one-run result</text>
+<rect class="acc" x="420" y="324" width="24" height="12" rx="2"/>
+<text class="leg" x="452" y="333">headline failure: reward-model overoptimization</text>
+</svg>
