@@ -1036,7 +1036,10 @@ def run_grpo(
     ref = load_model(args.base)
     print(
         f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm} "
-        f"unbiased_kl={args.unbiased_kl} fill_batch={args.fill_batch}"
+        f"unbiased_kl={args.unbiased_kl} fill_batch={args.fill_batch} "
+        f"policy_loss={args.policy_loss} advantage={args.advantage} "
+        f"clip=[{args.clip_eps},{args.clip_eps_high}] beta={args.beta} mu={args.mu} "
+        f"ref_reset_every={args.ref_reset_every}"
     )
 
     def log(rec: dict[str, float]) -> None:
@@ -1067,6 +1070,10 @@ def run_grpo(
         effort_k0=args.effort_k0,
         reward_fn=reward_fn,
         ops=args.ops,
+        policy_loss=args.policy_loss,
+        clip_eps_high=args.clip_eps_high,
+        advantage=args.advantage,
+        ref_reset_every=args.ref_reset_every,
         observe=observe,
         on_step=log,
         seed=args.seed,
@@ -1123,9 +1130,10 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
     )
     s.add_argument(
         "--loss-agg",
-        choices=["seq-mean", "token-sum"],
+        choices=["seq-mean", "token-sum", "token-mean", "group-mean"],
         default="seq-mean",
-        help="per-sequence token mean (GRPO) or sum over a constant max length (Dr. GRPO)",
+        help="per-sequence token mean (GRPO), sum over a constant max length (Dr. GRPO), "
+        "total-token mean over the batch (DAPO, CISPO) or over each group (Magistral)",
     )
     s.add_argument(
         "--unbiased-kl",
@@ -1148,6 +1156,33 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--policy-loss",
+        choices=["ppo", "gspo", "cispo"],
+        default="ppo",
+        help="surrogate: per-token PPO clip (GRPO), sequence-level ratio (GSPO) or "
+        "stop-gradient clipped IS weight (CISPO)",
+    )
+    s.add_argument(
+        "--clip-eps-high",
+        type=float,
+        default=None,
+        help="upper clip range, default --clip-eps (DAPO/Magistral clip-higher: 0.28)",
+    )
+    s.add_argument(
+        "--advantage",
+        choices=["group", "batch", "rloo"],
+        default="group",
+        help="group: (r - mean)/std (--no-std-norm drops the std); batch: group-centred, "
+        "divided by the batch std (Magistral); rloo: r_i - mean of the others, no std",
+    )
+    s.add_argument(
+        "--ref-reset-every",
+        type=int,
+        default=0,
+        help="every N steps set the KL reference to the current policy and reset the "
+        "optimizer (ProRL); 0 = never",
+    )
     add_ops_arg(s)
     s.add_argument("--out", default=str(out))
 
