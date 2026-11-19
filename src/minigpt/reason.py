@@ -27,6 +27,7 @@ from minigpt.sft import SFTDataset
 
 ANSWER_RE = re.compile(r"<answer>(\d+)</answer>")
 FORMAT_RE = re.compile(r"<think>[^<]*</think><answer>\d+</answer>")
+THINK_RE = re.compile(r"<think>([^<]*)")
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,17 @@ def format_reward(completion: str) -> float:
     return 1.0 if FORMAT_RE.fullmatch(completion.strip()) else 0.0
 
 
+def think_tokens(completion: str) -> int:
+    """Reasoning tokens: characters after `<think>` up to the next tag (bytewise tokenizer)."""
+    m = THINK_RE.search(completion)
+    return len(m.group(1)) if m else 0
+
+
+def effort_prefix(effort: int | None) -> str:
+    """Prompt prefix that requests reasoning effort `effort` (`e9:`); empty when None."""
+    return "" if effort is None else f"e{effort}:"
+
+
 @torch.no_grad()
 def sample_group(
     model: GPTModel,
@@ -152,12 +164,27 @@ def decode_completion(tok: BPETokenizer, ids: list[int]) -> str:
     return tok.decode([i for i in ids if i != tok.eos_token_id])
 
 
-def sft_trace_dataset(tasks: list[Task], tok: BPETokenizer) -> SFTDataset:
-    """Cold-start SFT data (DeepSeek-R1 style): raw prompt, reference trace + EOS, prompt masked."""
+def sft_trace_dataset(
+    tasks: list[Task],
+    tok: BPETokenizer,
+    efforts: tuple[int, ...] = (),
+    nothink_frac: float = 0.0,
+    seed: int = 0,
+) -> SFTDataset:
+    """Cold-start SFT data (DeepSeek-R1 style): raw prompt, reference trace + EOS, prompt masked.
+
+    With `efforts`, each prompt gets a random effort prefix. A `nothink_frac` share of traces
+    is the non-think form `<think></think><answer>N</answer>`, drawn independently of the effort
+    so that RL has to learn which effort should think.
+    """
+    rng = random.Random(seed)
     ds = SFTDataset([], tok)
     for t in tasks:
+        prefix = effort_prefix(rng.choice(efforts)) if efforts else ""
+        nothink = nothink_frac > 0 and rng.random() < nothink_frac
+        solution = f"<think></think><answer>{t.answer}</answer>" if nothink else t.solution()
         x, y = build_batch(
-            [tok.encode(t.prompt)], [[*tok.encode(t.solution()), tok.eos_token_id]], pad_id=0
+            [tok.encode(prefix + t.prompt)], [[*tok.encode(solution), tok.eos_token_id]], pad_id=0
         )
         ds.examples.append((x[0], y[0]))
     return ds
@@ -170,11 +197,13 @@ def evaluate_reasoning(
     n_per_digit: int = 50,
     seed: int = 0,
     max_new_tokens: int = 100,
+    effort: int | None = None,
 ) -> dict[str, Any]:
     """Greedy accuracy, format rate and mean completion tokens (EOS included) on fixed tasks.
 
     `n_per_digit` tasks for each digit count 1-5, drawn from `Random(seed)`, so every model is
-    scored on the same tasks. Returns the overall means plus `per_digit[d]`.
+    scored on the same tasks. With `effort`, every prompt carries its prefix. Returns the overall
+    means plus `per_digit[d]`; `think_tokens` counts only reasoning tokens.
     """
     rng = random.Random(seed)
     device = next(model.parameters()).device
@@ -183,7 +212,10 @@ def evaluate_reasoning(
     for d in range(1, 6):
         tasks = [make_task(rng, d) for _ in range(n_per_digit)]
         # Both operands have d digits, so every prompt of this group has the same length.
-        x = torch.tensor([tok.encode(t.prompt) for t in tasks], dtype=torch.long, device=device)
+        prefix = effort_prefix(effort)
+        x = torch.tensor(
+            [tok.encode(prefix + t.prompt) for t in tasks], dtype=torch.long, device=device
+        )
         out = model.generate(x, max_new_tokens, temperature=0.0, eos_token_id=eos)
         rows = [r[: r.index(eos) + 1] if eos in r else r for r in out[:, x.size(1) :].tolist()]
         texts = [decode_completion(tok, r) for r in rows]
@@ -192,6 +224,7 @@ def evaluate_reasoning(
             "accuracy": sum(correct) / n_per_digit,
             "format": sum(format_reward(s) for s in texts) / n_per_digit,
             "mean_tokens": sum(len(r) for r in rows) / n_per_digit,
+            "think_tokens": sum(think_tokens(s) for s in texts) / n_per_digit,
         }
     overall = {k: sum(v[k] for v in per_digit.values()) / len(per_digit) for k in per_digit[1]}
     return {**overall, "per_digit": per_digit}
