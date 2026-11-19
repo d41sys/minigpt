@@ -1098,7 +1098,7 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         help="comma list of effort levels, e.g. 1,9: one group per level per task, length "
         "penalty decaying with the level (DeepSeek-V4.1 reasoning effort)",
     )
-    s.add_argument("--effort-k0", type=float, default=0.5, help="length penalty at the lowest level")
+    s.add_argument("--effort-k0", type=float, default=0.5, help="length penalty at the lowest b")
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
