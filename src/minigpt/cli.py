@@ -477,6 +477,8 @@ def cmd_opd(args: argparse.Namespace) -> None:
             sys.exit(f"{student_path} not found: pass --student or --student-config")
         student = load_model(student_path)
     mode = "off-policy SFT on teacher samples" if args.off_policy else f"on-policy {args.kl} KL"
+    if args.estimator == "token" and not args.off_policy:
+        mode = f"on-policy token-level policy gradient (r_max {args.r_max})"
     print(f"device={device} {mode} ops={','.join(args.ops)} teacher={args.teacher}")
     n_teachers = ", ".join(f"{op} {count_parameters(m):,}" for op, m in teachers.items())
     print(f"params: student {count_parameters(student):,}, teachers {n_teachers}")
@@ -497,6 +499,8 @@ def cmd_opd(args: argparse.Namespace) -> None:
         seed=args.seed,
         device=device,
         ops=args.ops,
+        estimator=args.estimator,
+        r_max=args.r_max,
     )
     for row in res["history"]:
         line = (
@@ -1286,6 +1290,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--eval-tasks", type=int, default=64)
     s.add_argument("--seed", type=int, default=0)
     add_ops_arg(s)
+    s.add_argument(
+        "--estimator",
+        choices=["full", "token"],
+        default="full",
+        help="on-policy loss: full-vocabulary KL, or the sampled token's clipped log-ratio as a "
+        "policy-gradient reward (Kimi K3 / GLM-5 / Nemotron 3 Ultra); ignores --kl",
+    )
+    s.add_argument("--r-max", type=float, default=5.0, help="--estimator token: reward clip")
     s.add_argument("--out", default=None, help=f"default {OPD_CKPT} ({OPD_OFF_POLICY_CKPT} off)")
     s.set_defaults(func=cmd_opd)
 

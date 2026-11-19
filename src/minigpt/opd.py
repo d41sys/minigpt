@@ -51,6 +51,7 @@ from minigpt.reason import (
 from minigpt.train import configure_optimizers, get_device
 
 KLMode = Literal["reverse", "forward"]
+Estimator = Literal["full", "token"]
 
 
 def token_kl(
@@ -75,14 +76,43 @@ def token_kl(
     return torch.where(mask, per_pos, torch.zeros_like(per_pos)).sum() / mask.sum().clamp(min=1)
 
 
+def token_pg_loss(
+    student: nn.Module,
+    teacher: nn.Module,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    r_max: float = 5.0,
+) -> torch.Tensor:
+    """OPD as RL (Kimi K3 §4.1.3 eq. 15, GLM-5 §3.5 eq. 2, Nemotron 3 Ultra §3.3 eq. 2).
+
+    The student's sampled token `y_t` earns the reward `clip(sg(log p_t(y_t) - log p_s(y_t)),
+    -r_max, r_max)` and the loss is the policy gradient `-mean(reward * log p_s(y_t))` over
+    completion tokens. One update per batch, so the PPO ratio is 1 and the clip is omitted. In
+    expectation the reward is minus the per-token reverse KL, but from one sampled token
+    instead of the whole vocabulary, so it is noisier than `token_kl` (DeepSeek-V4 §5.1.2).
+    """
+    logps, mask = per_token_log_probs(student, input_ids, labels)
+    with torch.no_grad():
+        t_logps, _ = per_token_log_probs(teacher, input_ids, labels)
+        reward = (t_logps - logps.detach()).clamp(-r_max, r_max)
+    return -(reward * logps).sum() / mask.sum().clamp(min=1)
+
+
 def opd_loss(
     student: nn.Module,
     teacher: nn.Module,
     input_ids: torch.Tensor,
     labels: torch.Tensor,
     mode: KLMode = "reverse",
+    estimator: Estimator = "full",
+    r_max: float = 5.0,
 ) -> torch.Tensor:
-    """KL(student, teacher) per completion token; `labels == -100` (prompt, padding) is skipped."""
+    """KL(student, teacher) per completion token; `labels == -100` (prompt, padding) is skipped.
+
+    `estimator="token"` returns the policy-gradient surrogate instead (`token_pg_loss`).
+    """
+    if estimator == "token":
+        return token_pg_loss(student, teacher, input_ids, labels, r_max)
     student_logits, _ = student(input_ids)
     with torch.no_grad():
         teacher_logits, _ = teacher(input_ids)
@@ -96,12 +126,14 @@ def routed_opd_loss(
     labels: torch.Tensor,
     row_ops: Sequence[str],
     mode: KLMode = "reverse",
+    estimator: Estimator = "full",
+    r_max: float = 5.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """KL against each row's own teacher, `teachers[row_ops[i]]` for row `i`.
 
     The loss is the token-weighted mean over teachers: a teacher's weight is its share of the
     batch's completion tokens (so it equals the plain per-token mean over the whole batch).
-    Also returns each op's mean KL per token, detached.
+    Also returns each op's mean loss per token, detached.
     """
     n_total = (labels != -100).sum().clamp(min=1)
     parts: list[torch.Tensor] = []
@@ -109,7 +141,7 @@ def routed_opd_loss(
     for op in dict.fromkeys(row_ops):
         idx = torch.tensor([i for i, o in enumerate(row_ops) if o == op], device=input_ids.device)
         y = labels[idx]
-        op_kl = opd_loss(student, teachers[op], input_ids[idx], y, mode)
+        op_kl = opd_loss(student, teachers[op], input_ids[idx], y, mode, estimator, r_max)
         parts.append(op_kl * (y != -100).sum() / n_total)
         by_op[op] = op_kl.item()
     return torch.stack(parts).sum(), by_op
@@ -193,13 +225,17 @@ def train_opd(
     seed: int = 0,
     device: torch.device | None = None,
     ops: Sequence[str] = "+",
+    estimator: Estimator = "full",
+    r_max: float = 5.0,
 ) -> dict[str, Any]:
     """Distil `teachers` into `student` on prompts of 1..`digits` digits, one op drawn from `ops`.
 
     `teachers` maps op -> frozen model (a single model serves every op). Each prompt is scored
     against its op's teacher and the loss is the token-weighted mean of the per-teacher KLs.
     On-policy (default): the student samples at `temperature`, the loss is `kl` against the
-    teacher on those samples. `off_policy`: each prompt is sampled from its op's teacher at
+    teacher on those samples (`estimator="token"` swaps the full-vocabulary KL for the sampled
+    token's clipped log-ratio as a policy-gradient reward, `token_pg_loss`).
+    `off_policy`: each prompt is sampled from its op's teacher at
     `temperature` (0 = greedy) and the student minimises cross-entropy on them; `kl` is then
     unused for training. Every `eval_every` steps (and at step 0) both modes are scored the same
     way, on a fixed seeded task set with greedy student rollouts, so their reverse-KL curves are
@@ -247,7 +283,7 @@ def train_opd(
             logps, mask = per_token_log_probs(student, x, y)
             loss = -logps.sum() / mask.sum().clamp(min=1)
         else:
-            loss, _ = routed_opd_loss(student, routes, x, y, row_ops, kl)
+            loss, _ = routed_opd_loss(student, routes, x, y, row_ops, kl, estimator, r_max)
         optimizer.zero_grad()
         loss.backward()  # type: ignore[no-untyped-call]
         torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
