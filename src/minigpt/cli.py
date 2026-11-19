@@ -66,7 +66,14 @@ from minigpt.finetune_cls import (
     split_data,
     train_classifier,
 )
-from minigpt.grpo import RewardFn, Samples, default_reward, train_grpo
+from minigpt.grpo import (
+    RewardFn,
+    Samples,
+    default_reward,
+    estimate_budgets,
+    make_shaper,
+    train_grpo,
+)
 from minigpt.model import GPTConfig, GPTModel, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
@@ -1023,6 +1030,11 @@ def cmd_reason_eval(args: argparse.Namespace) -> None:
     print(report_reasoning(model, tok, args.n, args.seed, args.efforts, args.ops))
 
 
+def parse_floats(s: str) -> tuple[float, ...]:
+    """`--budget-tau 1.5,1.0` -> (1.5, 1.0); the empty string means off."""
+    return tuple(float(x) for x in s.split(",")) if s else ()
+
+
 def run_grpo(
     args: argparse.Namespace,
     reward_fn: RewardFn,
@@ -1040,6 +1052,32 @@ def run_grpo(
         f"policy_loss={args.policy_loss} advantage={args.advantage} "
         f"clip=[{args.clip_eps},{args.clip_eps_high}] beta={args.beta} mu={args.mu} "
         f"ref_reset_every={args.ref_reset_every}"
+    )
+    budgets = None
+    if args.budget_tau:
+        budgets = estimate_budgets(
+            ref.to(device).eval(),
+            tok,
+            (args.min_digits, args.max_digits),
+            args.efforts,
+            args.ops,
+            8,
+            args.group,
+            args.max_new_tokens,
+            args.temperature,
+            args.seed,
+        )
+        shown = {k: round(v, 1) for k, v in budgets.items()}
+        print(f"budgets b0 (effort, digits) in think tokens: {shown}")
+        seed_everything(args.seed)  # same rollout stream as a run without budgets
+    shaper = make_shaper(
+        args.steps,
+        args.max_new_tokens,
+        budgets,
+        args.budget_tau or (1.0,),
+        args.length_reward,
+        args.length_warmup,
+        args.overlong_cache,
     )
 
     def log(rec: dict[str, float]) -> None:
@@ -1068,6 +1106,7 @@ def run_grpo(
         fill_batch=args.fill_batch,
         efforts=args.efforts,
         effort_k0=args.effort_k0,
+        shape=shaper,
         reward_fn=reward_fn,
         ops=args.ops,
         policy_loss=args.policy_loss,
@@ -1153,6 +1192,29 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         "penalty decaying with the level (DeepSeek-V4.1 reasoning effort)",
     )
     s.add_argument("--effort-k0", type=float, default=0.5, help="length penalty at the lowest b")
+    s.add_argument(
+        "--budget-tau",
+        type=parse_floats,
+        default=(),
+        help="comma list of budget multipliers, one per equal stage of --steps, e.g. 1.5,1.0: "
+        "a sample with more think tokens than tau * b0 (the SFT model's mean for that digit "
+        "count) gets reward -1, even if correct (Kimi K3 reasoning-effort RL)",
+    )
+    s.add_argument(
+        "--length-reward",
+        type=float,
+        default=0.0,
+        help="weight of the in-group length reward for correct/wrong answers (Kimi K1.5 2.3.3)",
+    )
+    s.add_argument(
+        "--length-warmup", type=int, default=0, help="steps without --length-reward (Kimi K1.5)"
+    )
+    s.add_argument(
+        "--overlong-cache",
+        type=int,
+        default=0,
+        help="soft overlong penalty over the last N of --max-new-tokens, -1 at the cap (DAPO 3.4)",
+    )
     s.add_argument("--eval-n", type=int, default=50, help="fixed tasks per digit count")
     s.add_argument("--log-every", type=int, default=10)
     s.add_argument("--seed", type=int, default=0)
