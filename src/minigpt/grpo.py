@@ -262,6 +262,7 @@ def train_grpo(
     clip_eps_high: float | None = None,
     advantage: str = "group",
     ref_reset_every: int = 0,
+    optim: str = "adamw",
 ) -> dict[str, Any]:
     """Run GRPO; `ref` stays frozen. Returns `{"history": [per-step dict]}`.
 
@@ -299,14 +300,16 @@ def train_grpo(
     ref.requires_grad_(False)
     if ref_reset_every:
         ref = copy.deepcopy(ref)
-    optimizer = configure_optimizers(policy, weight_decay=0.0, learning_rate=lr)
+    optimizer = configure_optimizers(policy, weight_decay=0.0, learning_rate=lr, optim=optim)
     rng = random.Random(seed)
     eos, pad = tok.eos_token_id, tok.special_to_id["<|pad|>"]
     history: list[dict[str, float]] = []
     for step in range(steps):
         if ref_reset_every and step and step % ref_reset_every == 0:
             ref.load_state_dict(policy.state_dict())
-            optimizer = configure_optimizers(policy, weight_decay=0.0, learning_rate=lr)
+            optimizer = configure_optimizers(
+                policy, weight_decay=0.0, learning_rate=lr, optim=optim
+            )
         entries: list[tuple[Task, int | None]] = []  # one per group: (task, effort)
         prompts: list[list[int]] = []
         groups: list[list[list[int]]] = []

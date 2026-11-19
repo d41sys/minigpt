@@ -157,6 +157,7 @@ def train_sft(
     batch_size: int = 4,
     learning_rate: float = 2e-5,
     device: torch.device | None = None,
+    optim: str = "adamw",
 ) -> dict[str, Any]:
     """Train SFT model on instruction-response dataset."""
     if device is None:
@@ -166,7 +167,9 @@ def train_sft(
     model.train()
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=sft_collate_fn)
-    optimizer = configure_optimizers(model, learning_rate=learning_rate, weight_decay=0.01)
+    optimizer = configure_optimizers(
+        model, learning_rate=learning_rate, weight_decay=0.01, optim=optim
+    )
 
     history = []
     for epoch in range(epochs):
