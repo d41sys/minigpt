@@ -105,31 +105,37 @@ Reading:
 | control: dense, `--d-model 176` | 1.56M | 1.684 / 1.730 / 1.672 / 1.640 | 0.49 / 0.56 / 0.62 / 0.12 | 0.87 / 0.65 / 0.45 |
 | control: all V4 without Muon (AdamW in pretrain and SFT) | 2.31M (1.26M) | 1.494 / 1.545 / 1.517 / 1.547 | 0.90 / 0.79 / 0.63 / 0.79 | 0.99 / 0.92 / 0.78 |
 
+Verdict rule for this table (4 seeds per row): a difference is measurable only when the two seed
+ranges do not overlap and the gap between the ranges is larger than 0.05 for accuracy (about one
+standard error of a difference at 200 tasks) or larger than the wider of the two ranges for val
+loss. Per-seed comparisons are given as description only.
+
 - Size does not explain the all-V4 result. A dense model larger than all V4's active parameters
   (1.56M vs 1.26M) reaches 0.45 at 3 digits, about the same as the 0.84M dense (0.39).
-- The V4 architecture without Muon beats that larger dense model on pretrain val loss on all 4
-  seeds (1.49-1.55 vs 1.64-1.73; smallest gap 0.09, just above the dense seed spread) and on
-  3-digit accuracy on all 4 seeds (mean 0.78 vs 0.45; the smallest gap, seed 2, is 0.005, so by the
-  strict rule accuracy is not a measurable difference).
-- Muon alone, on the unchanged dense model, is the largest single gain. Val loss is lower on
-  every seed (1.44-1.49 vs 1.72-1.74; smallest gap 0.24, seed spread 0.04) and every Muon seed
-  (3-digit 0.95-0.97) is above every dense seed (0.08-0.71), with 0.24 between the ranges. It also
-  removes the seed lottery: dense spans 0.63 at 3 digits, Muon 0.02.
+- The V4 architecture without Muon beats that larger dense model on pretrain val loss: ranges
+  1.49-1.55 vs 1.64-1.73, gap 0.09, just above the wider range (0.09). On 3-digit accuracy it is
+  higher on every seed (mean 0.78 vs 0.45), but the ranges only just clear each other (0.63-0.90
+  vs 0.12-0.62, gap 0.005), so accuracy is not a measurable difference.
+- Muon alone, on the unchanged dense model, is the largest single gain, measurable on both
+  metrics: val loss ranges 1.44-1.49 vs 1.72-1.74 (gap 0.24, wider range 0.04); 3-digit accuracy
+  ranges 0.95-0.97 vs 0.08-0.71 (gap 0.24). All V4 vs dense is measurable the same way (0.86-0.99
+  vs 0.08-0.71, gap 0.16). Muon also removes the seed lottery: dense spans 0.63 at 3 digits,
+  Muon 0.02.
 - Muon alone matches all V4 on accuracy (0.96 vs 0.95); accuracy is near its ceiling for both. On
   val loss the two gains roughly add: Muon −0.27, architecture −0.20, both −0.52 (1.73 → 1.21).
 - Limit of the Muon result: the AdamW learning rate was not tuned and dense is still improving at
   step 1500 (train ≈ val). [INFERENCE] Muon may mainly train faster; a tuned AdamW or more steps
   might close the gap. Not tested. On Shakespeare, which overfits, the same speed-up gave no
   held-out gain.
-- MTP alone: no measurable difference (val loss lower on 1 seed of 4; 3-digit accuracy higher on
-  3 seeds, lower on 1). mHC alone: no measurable difference (val loss higher on all 4 seeds, but
-  by 0.005-0.014, inside the seed spread; 3-digit accuracy lower on 3 seeds of 4).
+- MTP alone: no measurable difference (val loss and accuracy ranges overlap dense; 3-digit
+  accuracy higher on 3 seeds, lower on 1). mHC alone: no measurable difference (val loss higher
+  on all 4 seeds by 0.005-0.014, ranges overlap; 3-digit accuracy higher on 2 seeds, lower on 2).
 - Of the four architecture parts run alone (MoE, MTP, mHC, CSA), only CSA lowers pretrain val
   loss, and CSA alone equals the whole architecture without Muon (mean 1.52 vs 1.53).
   [INFERENCE] CSA carries the architecture gain on this task; combinations other than "all" were
   not run.
-- CSA: pretrain loss clearly lower on all 4 seeds (1.52 vs 1.73); 3-digit accuracy higher on all 4
-  seeds but by less than dense's own seed spread, so no measurable accuracy difference by the rule.
+- CSA: pretrain loss measurably lower (1.51-1.53 vs 1.72-1.74); 3-digit accuracy higher on all 4
+  seeds, but the ranges overlap (0.39-0.86 vs 0.08-0.71), so no measurable accuracy difference.
   [INFERENCE] The local window plus selected blocks may make digit alignment easier; not tested.
 - MoE at matched active params: no measurable difference in loss or accuracy.
 - The dense SFT result swings 0.08-0.71 across seeds at 3 digits, which is why 4 seeds were used.
