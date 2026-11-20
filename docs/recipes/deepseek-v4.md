@@ -91,13 +91,16 @@ Reading:
 
 `v4rp.sh`: `reason-pretrain` (1500 steps, default 0.84M dense) → `reason-sft --n 10000 --epochs 3`
 → `reason-eval --n 200`, seeds 0-3. "all" = `--optimizer muon --n-experts 8 --mtp-depth 1
---hc-streams 4 --attn-type csa`, and its SFT also uses Muon.
+--hc-streams 4 --attn-type csa`. Every Muon row uses Muon in both pretrain and SFT.
 
 | Variant | Params (active) | Pretrain final val loss, s0-s3 | Greedy accuracy after SFT, 3 digits, s0 / s1 / s2 / s3 | 1 / 2 / 3 digits, mean of 4 seeds |
 |---|---|---|---|---|
 | dense | 0.84M | 1.721 / 1.733 / 1.737 / 1.726 | 0.08 / 0.31 / 0.46 / 0.71 | 0.88 / 0.66 / 0.39 |
 | + MoE 8 × top-2 | 1.90M (0.85M) | 1.731 / 1.727 / 1.731 / 1.710 | 0.55 / 0.27 / 0.60 / 0.54 | 0.90 / 0.69 / 0.49 |
 | + CSA | 0.91M | 1.516 / 1.514 / 1.533 / 1.516 | 0.65 / 0.39 / 0.51 / 0.86 | 0.97 / 0.88 / 0.60 |
+| + MTP depth 1 | 1.07M | 1.734 / 1.740 / 1.659 / 1.735 | 0.46 / 0.35 / 0.78 / 0.52 | 0.91 / 0.72 / 0.53 |
+| + mHC 4 streams | 0.94M | 1.734 / 1.747 / 1.742 / 1.737 | 0.19 / 0.40 / 0.16 / 0.10 | 0.76 / 0.44 / 0.21 |
+| + Muon | 0.84M | 1.441 / 1.485 / 1.453 / 1.448 | 0.97 / 0.97 / 0.97 / 0.95 | 1.00 / 0.99 / 0.96 |
 | all V4 | 2.31M (1.26M) | 1.205 / 1.211 / 1.205 / 1.206 | 0.98 / 0.99 / 0.99 / 0.86 | 1.00 / 0.99 / 0.95 |
 | control: dense, `--d-model 176` | 1.56M | 1.684 / 1.730 / 1.672 / 1.640 | 0.49 / 0.56 / 0.62 / 0.12 | 0.87 / 0.65 / 0.45 |
 | control: all V4 without Muon (AdamW in pretrain and SFT) | 2.31M (1.26M) | 1.494 / 1.545 / 1.517 / 1.547 | 0.90 / 0.79 / 0.63 / 0.79 | 0.99 / 0.92 / 0.78 |
@@ -108,16 +111,23 @@ Reading:
   seeds (1.49-1.55 vs 1.64-1.73; smallest gap 0.09, just above the dense seed spread) and on
   3-digit accuracy on all 4 seeds (mean 0.78 vs 0.45; the smallest gap, seed 2, is 0.005, so by the
   strict rule accuracy is not a measurable difference).
-- Adding Muon to the V4 bundle lowers pretrain val loss on every seed (1.21 vs 1.49-1.55), a
-  measurable gain. Its 3-digit accuracy gain (mean 0.95 vs 0.78; per seed +0.08 / +0.20 / +0.36 /
-  +0.07) stays within the no-Muon seed spread (0.63-0.90), so by the strict rule it is not
-  measurable, and it is smaller than the architecture step (0.45 → 0.78). Muon was only removed
-  from the bundle, never added to the dense model on equations. Unlike Shakespeare, the equation
-  corpus (553k tokens of generated sums) does not overfit in 1500 steps (train ≈ val for dense),
-  so faster fitting can show up as a held-out gain.
-- CSA alone reaches about the same pretrain val loss as the whole architecture without Muon
-  (mean 1.52 vs 1.53). [INFERENCE] CSA likely carries most of the architecture gain on this task;
-  MTP and mHC were not run alone here, so that is not isolated.
+- Muon alone, on the unchanged dense model, is the largest single gain. Val loss is lower on
+  every seed (1.44-1.49 vs 1.72-1.74; smallest gap 0.24, seed spread 0.04) and every Muon seed
+  (3-digit 0.95-0.97) is above every dense seed (0.08-0.71), with 0.24 between the ranges. It also
+  removes the seed lottery: dense spans 0.63 at 3 digits, Muon 0.02.
+- Muon alone matches all V4 on accuracy (0.96 vs 0.95); accuracy is near its ceiling for both. On
+  val loss the two gains roughly add: Muon −0.27, architecture −0.20, both −0.52 (1.73 → 1.21).
+- Limit of the Muon result: the AdamW learning rate was not tuned and dense is still improving at
+  step 1500 (train ≈ val). [INFERENCE] Muon may mainly train faster; a tuned AdamW or more steps
+  might close the gap. Not tested. On Shakespeare, which overfits, the same speed-up gave no
+  held-out gain.
+- MTP alone: no measurable difference (val loss lower on 1 seed of 4; 3-digit accuracy higher on
+  3 seeds, lower on 1). mHC alone: no measurable difference (val loss higher on all 4 seeds, but
+  by 0.005-0.014, inside the seed spread; 3-digit accuracy lower on 3 seeds of 4).
+- Of the four architecture parts run alone (MoE, MTP, mHC, CSA), only CSA lowers pretrain val
+  loss, and CSA alone equals the whole architecture without Muon (mean 1.52 vs 1.53).
+  [INFERENCE] CSA carries the architecture gain on this task; combinations other than "all" were
+  not run.
 - CSA: pretrain loss clearly lower on all 4 seeds (1.52 vs 1.73); 3-digit accuracy higher on all 4
   seeds but by less than dense's own seed spread, so no measurable accuracy difference by the rule.
   [INFERENCE] The local window plus selected blocks may make digit alignment easier; not tested.
@@ -152,11 +162,11 @@ mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (s
 |---|---|
 | Aux-loss-free balancing | works: even load, no loss cost |
 | MoE (matched active params) | no measurable gain; overfits a small corpus faster; weak operator-dependent routing on shared tokens |
-| Multi-token prediction | no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap) |
-| mHC | no measurable difference |
+| Multi-token prediction | Shakespeare: no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap). Equations: no measurable difference |
+| mHC | no measurable difference on either task |
 | Compressed sparse attention | lower pretrain loss on equations; overfits Shakespeare faster; no speed gain at this context |
-| Muon | on Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps); added to the V4 bundle on equations it lowers val loss (1.21 vs 1.53, all seeds), while its accuracy gain (0.95 vs 0.78) is within seed spread; never run on the dense model for equations |
-| All V4 together | best reasoning model (3-digit 0.95 vs 0.39); a larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it still reaches 0.78. Memorises Shakespeare |
+| Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps). AdamW's learning rate was not tuned |
+| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Memorises Shakespeare |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
 the dense model; that measures this implementation, not the architecture.
@@ -167,4 +177,5 @@ the dense model; that measures this implementation, not the architecture.
 - One tiny corpus (414k training tokens) and one toy task; overfitting dominates the LM results.
 - "All V4" is not compute-matched on Shakespeare (6.5M vs 5.1M active). On equations the larger
   dense control (1.56M) covers size; the control has no Shakespeare counterpart.
+- AdamW's learning rate was not tuned, so "Muon beats AdamW" holds for the default settings only.
 - Logs: `runs/logs/v4_*` (gitignored).
