@@ -108,9 +108,13 @@ Reading:
   seeds (1.49-1.55 vs 1.64-1.73; smallest gap 0.09, just above the dense seed spread) and on
   3-digit accuracy on all 4 seeds (mean 0.78 vs 0.45; the smallest gap, seed 2, is 0.005, so by the
   strict rule accuracy is not a measurable difference).
-- Muon adds a clear further gain on top: val loss 1.21 vs 1.49-1.55 on every seed, 3-digit 0.95
-  vs 0.78. Unlike on Shakespeare, the equation corpus (553k tokens of generated sums) does not
-  overfit in 1500 steps (train ≈ val for dense), so faster fitting shows up as a held-out gain.
+- Adding Muon to the V4 bundle lowers pretrain val loss on every seed (1.21 vs 1.49-1.55), a
+  measurable gain. Its 3-digit accuracy gain (mean 0.95 vs 0.78; per seed +0.08 / +0.20 / +0.36 /
+  +0.07) stays within the no-Muon seed spread (0.63-0.90), so by the strict rule it is not
+  measurable, and it is smaller than the architecture step (0.45 → 0.78). Muon was only removed
+  from the bundle, never added to the dense model on equations. Unlike Shakespeare, the equation
+  corpus (553k tokens of generated sums) does not overfit in 1500 steps (train ≈ val for dense),
+  so faster fitting can show up as a held-out gain.
 - CSA alone reaches about the same pretrain val loss as the whole architecture without Muon
   (mean 1.52 vs 1.53). [INFERENCE] CSA likely carries most of the architecture gain on this task;
   MTP and mHC were not run alone here, so that is not isolated.
@@ -151,7 +155,7 @@ mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (s
 | Multi-token prediction | no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap) |
 | mHC | no measurable difference |
 | Compressed sparse attention | lower pretrain loss on equations; overfits Shakespeare faster; no speed gain at this context |
-| Muon | on Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps); on the non-overfitting equation corpus, added on top of the V4 architecture, it gives a clear gain (val 1.21 vs 1.53, 3-digit 0.95 vs 0.78); not run alone on equations |
+| Muon | on Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps); added to the V4 bundle on equations it lowers val loss (1.21 vs 1.53, all seeds), while its accuracy gain (0.95 vs 0.78) is within seed spread; never run on the dense model for equations |
 | All V4 together | best reasoning model (3-digit 0.95 vs 0.39); a larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it still reaches 0.78. Memorises Shakespeare |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
