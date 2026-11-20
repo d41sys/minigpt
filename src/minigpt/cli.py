@@ -16,6 +16,7 @@ import copy
 import json
 import random
 import sys
+import time
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -74,7 +75,7 @@ from minigpt.grpo import (
     make_shaper,
     train_grpo,
 )
-from minigpt.model import GPTConfig, GPTModel, count_parameters
+from minigpt.model import GPTConfig, GPTModel, MoEFeedForward, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
@@ -239,6 +240,8 @@ ARCH_FIELDS = (
     "csa_block",
     "csa_topk",
     "csa_window",
+    "moe_bias_rate",
+    "moe_balance_alpha",
 )
 
 
@@ -285,6 +288,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     val_loader = create_dataloader(
         val_ids, cfg.context_length, args.batch_size, shuffle=False, drop_last=False
     )
+    t0 = time.perf_counter()
     res = train(
         model,
         train_loader,
@@ -299,6 +303,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         bf16=args.bf16,
         optim=args.optim,
     )
+    seconds = time.perf_counter() - t0
     for row in res["history"]:
         print(
             f"step {int(row['step']):5d} train {row['train_loss']:.4f} "
@@ -307,10 +312,15 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     v0, v1 = res["initial_val_loss"], res["final_val_loss"]
     print(f"val loss step0={v0:.4f} best={v1:.4f} drop={(v0 - v1) / v0 * 100:.1f}%")
     print(f"checkpoint -> {res['checkpoint_path']}")
-    ckpt = Path(res["checkpoint_path"])
-    payload = load_checkpoint(ckpt, model, device=device)
-    losses = half_losses(model, {"val": val_ids, "test": test_ids}, args.batch_size, device)
-    print(f"val-selected checkpoint (step {payload['step']}): {format_half_losses(losses)}")
+    if args.final:  # the model as training left it, not the val-selected checkpoint
+        halves = {"train": train_ids, "val": val_ids, "test": test_ids}
+        payload, label = {"step": args.steps - 1}, "final model"
+    else:
+        ckpt = Path(res["checkpoint_path"])
+        payload, label = load_checkpoint(ckpt, model, device=device), "val-selected checkpoint"
+        halves = {"val": val_ids, "test": test_ids}
+    losses = half_losses(model, halves, args.batch_size, device)
+    print(f"{label} (step {payload['step']}): {format_half_losses(losses)}")
     if args.results_out:
         out = Path(args.results_out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -327,6 +337,15 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
             "test_window_losses": losses["test"],
             "val_loss": float(np.mean(losses["val"])),
             "test_loss": float(np.mean(losses["test"])),
+            "final": args.final,
+            "train_eval_loss": float(np.mean(losses["train"])) if args.final else None,
+            "params": count_parameters(model),
+            "active_params": count_parameters(model, active=True),
+            "train_seconds": seconds,
+            # tokens routed to each expert in the last training step, one list per MoE layer
+            "moe_load": [
+                b.mlp.last_load.tolist() for b in model.blocks if isinstance(b.mlp, MoEFeedForward)
+            ],
         }
         out.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
         print(f"results -> {out}")
@@ -1454,6 +1473,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--grad-accum", type=int, default=1, help="micro-batches per optimizer step (default 1)"
     )
     s.add_argument("--bf16", action="store_true", help="bf16 autocast for forward and loss")
+    s.add_argument(
+        "--final",
+        action="store_true",
+        help="score the final-step model (adds the train split), not the best-val checkpoint",
+    )
     add_arch_args(s)
     add_optim_arg(s)
     s.set_defaults(func=cmd_pretrain)

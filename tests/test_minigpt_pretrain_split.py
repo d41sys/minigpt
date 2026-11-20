@@ -115,6 +115,34 @@ def test_pretrain_writes_val_selected_test_results(
     assert rec["selected_step"] in {0, 10, 20, 30, 39}
 
 
+def test_pretrain_final_scores_last_step_with_train_gap_and_moe_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    import minigpt.cli as cli
+
+    periodic = [i % 5 for i in range(500)]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "load_tokenizer", lambda: types.SimpleNamespace(vocab_size=50))
+    monkeypatch.setattr(cli, "shakespeare_splits", lambda _t: (periodic[:400], periodic[400:]))
+    monkeypatch.setattr(cli, "get_device", lambda: torch.device("cpu"))
+    out = tmp_path / "res.json"
+    argv = [
+        "pretrain", "--name", "t", "--steps", "10", "--eval-interval", "5", "--batch-size", "2",
+        "--context-length", "8", "--d-model", "16", "--num-layers", "2", "--num-heads", "2",
+        "--n-experts", "4", "--final", "--results-out", str(out),
+    ]  # fmt: skip
+    args = build_parser().parse_args(argv)
+    args.func(args)
+    rec = json.loads(out.read_text())
+    assert rec["final"] and rec["selected_step"] == 9
+    assert rec["train_eval_loss"] > 0 and rec["train_seconds"] > 0
+    assert rec["active_params"] < rec["params"]
+    assert len(rec["moe_load"]) == 2 and len(rec["moe_load"][0]) == 4
+    assert sum(rec["moe_load"][0]) == 2 * 8 * 2  # batch * context * top-2 assignments
+
+
 def test_split_halves_are_disjoint_windows() -> None:
     val, test = split_val_test(list(range(100)))
     val_w = SlidingWindowDataset(val, 8)

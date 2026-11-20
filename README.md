@@ -376,6 +376,20 @@ The second table (5 consolidation recipes) merges the `+` teacher (`runs/grpo`) 
 | Zhipu (GLM-5) | GRPO `+`, then GRPO `-`, then distil toward both stage checkpoints | stage 2 drops `+` 0.84 → 0.46; full distil `+` 0.56 / 0.36; token distil `+` 0.72 / 0.72 but `-` 0.48 / 0.44 | full does not recover the forgotten skill; token partly does, but its lr differs, so tentative |
 | Qwen (Qwen3 strong-to-weak) | 125k-param random-init student: off-policy, then on-policy distillation | on-policy and more off-policy both end at KL about 0.95, accuracy near 0 at 2–3 digits (seed 0 only) | no measurable difference |
 
+### Toy DeepSeek-V4 architecture
+
+Opt-in flags copy the DeepSeek-V4 report's architecture at toy scale. Covered: DeepSeekMoE with aux-loss-free balancing (`--n-experts`), multi-token prediction (`--mtp-depth`), mHC residual streams (`--hc-streams`), compressed sparse attention with a lightning indexer (`--attn-type csa`) and the Muon optimizer (`--optimizer muon`). Defaults keep the dense model, and every post-training command runs on the new checkpoints unchanged. Ablations ran on the Korea server at 2 seeds (4 for reasoning), scoring the final-step model. Full tables and the parts left out (HCA, FP4, hash routing) are in [`docs/recipes/deepseek-v4.md`](docs/recipes/deepseek-v4.md).
+
+| Part | Small-scale result |
+|---|---|
+| Aux-loss-free balancing | works: worst expert load 1.1× the mean, vs 2.2–2.8× with balancing off, at no loss cost |
+| MoE at matched active parameters | no measurable gain; overfits tiny-Shakespeare faster; experts split by `+` vs `-` (TV 0.50, p = 0.003) without an accuracy gain |
+| Multi-token prediction | the only single part that wins on held-out LM loss: test 3.76 vs 3.84 at 2000 steps |
+| mHC | no measurable difference |
+| Compressed sparse attention | equation pretrain loss 1.52 vs 1.73 on 4 seeds; overfits Shakespeare faster; no speed gain at 128–256 tokens |
+| Muon | fits faster, so it overfits the 1 MB corpus sooner; no held-out gain at 1000 steps |
+| All parts together | best reasoning model, 3-digit accuracy 0.95 vs 0.39 (4-seed means), but with 1.5× the active parameters and Muon; memorises Shakespeare (train loss 0.14) |
+
 ## Design decisions
 
 - **Byte-level BPE with GPT-2 regex pre-tokenisation.** Byte-level means no unknown tokens and lossless round-trips (tested on CJK and emoji). The regex stops merges from crossing word and punctuation boundaries. When two pairs have the same count, the smallest pair id wins, so training is deterministic. Encoding memoises each chunk, so encoding the 1.1 MB corpus takes seconds.
