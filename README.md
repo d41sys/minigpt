@@ -383,12 +383,12 @@ Opt-in flags copy the DeepSeek-V4 report's architecture at toy scale. Covered: D
 | Part | Small-scale result |
 |---|---|
 | Aux-loss-free balancing | works: worst expert load 1.1× the mean, vs 2.2–2.8× with balancing off, at no loss cost |
-| MoE at matched active parameters | no measurable gain; overfits tiny-Shakespeare faster; experts split by `+` vs `-` (TV 0.50, p = 0.003) without an accuracy gain |
-| Multi-token prediction | the only single part that wins on held-out LM loss: test 3.76 vs 3.84 at 2000 steps |
+| MoE at matched active parameters | no measurable gain; overfits tiny-Shakespeare faster; routing on tokens shared by `+` and `-` inputs differs only weakly after SFT (TV 0.13–0.18) |
+| Multi-token prediction | no difference on test loss at 1000 steps; at 2000 steps, past the overfitting point, it slows overfitting (test 3.76 vs 3.84, smallest train–val gap) |
 | mHC | no measurable difference |
 | Compressed sparse attention | equation pretrain loss 1.52 vs 1.73 on 4 seeds; overfits Shakespeare faster; no speed gain at 128–256 tokens |
-| Muon | fits faster, so it overfits the 1 MB corpus sooner; no held-out gain at 1000 steps |
-| All parts together | best reasoning model, 3-digit accuracy 0.95 vs 0.39 (4-seed means), but with 1.5× the active parameters and Muon; memorises Shakespeare (train loss 0.14) |
+| Muon | on Shakespeare it fits faster and overfits sooner; on the equation corpus, which does not overfit, it adds a clear gain on top of the V4 architecture (val 1.21 vs 1.53) |
+| All parts together | best reasoning model, 3-digit accuracy 0.95 vs 0.39 (4-seed means). A larger dense control (1.56M parameters vs 1.26M active) reaches only 0.45, so size does not explain it; without Muon it still reaches 0.78. Memorises Shakespeare (train loss 0.14) |
 
 ## Design decisions
 

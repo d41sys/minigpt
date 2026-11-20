@@ -21,9 +21,10 @@ indexer's separate distillation loss (here the indexer score is added to the att
 the LM loss trains it). At our 128-256-token contexts CSA cannot save compute; it is tested for
 quality only.
 
-Causality check of the trained checkpoints (`v4_rs_csa_s0`, `v4_rs_all_s0`, context 128): changing
-every future token changes past logits by 0.0 and 1.2e-5 (float noise), so the CSA gains below are
-not a future-token leak.
+Causality check of the trained CSA checkpoint `v4_rs_csa_s0` (context 128, block 4, top-4,
+window 8): for every cut t = 1..127, in both `eval()` and `train()` mode (dropout off),
+re-drawing tokens t..127 leaves logits 0..t-1 unchanged (max difference 0.0). The CSA gains below
+are not a future-token leak.
 
 ## 1. Language-model pretraining (tiny-Shakespeare)
 
@@ -31,7 +32,10 @@ not a future-token leak.
 model, B = 1000 and 2000 steps, seeds 0 and 1. `--final` scores the model as training left it,
 not the best-val checkpoint (tiny-Shakespeare overfits; see the README section on the
 selection-biased headline). Test and val are the two disjoint held-out halves. Verdict: both seeds
-on the same side of dense and the smaller gap larger than the larger seed spread.
+on the same side of dense and the smaller gap larger than the larger seed spread. "Train loss" is
+plain cross-entropy of the final model on the training split in eval mode, without the MTP and
+balance terms, so it is comparable across variants (the per-step `train` lines in the logs do
+include those terms).
 
 ### 1000 steps (dense has not started to overfit: its best val is at the last step)
 
@@ -74,10 +78,14 @@ Reading:
 - On this 1 MB corpus every part that adds capacity or speeds up fitting (Muon, MoE, CSA, all
   combined) lowers train loss and widens the val-train gap; past the overfitting point it loses
   on held-out loss. All V4 together memorises the corpus (train 0.14 at 2000 steps).
-- MTP is the only part that wins at 2000 steps, with the smallest gap. [INFERENCE] The extra
-  target acts as a regulariser here; no run separates that from MTP's extra 0.9M parameters.
-- At 1000 steps the val half says MoE, MTP, mHC and CSA are better and the test half says no
-  difference; the two halves disagree, so there is no claim at 1000 steps.
+- 1000 steps is the main budget. On the test half no single part differs from dense; only all V4
+  together is worse. The val half sits about 0.27 below test and favours MoE, MTP, mHC and CSA;
+  the halves disagree, so those val wins are split-specific and not claimed.
+- At 2000 steps every variant is past its best-val point and the verdicts mostly measure how fast
+  each variant memorises. MTP is the one that ends ahead (test 3.76 vs 3.84) with the smallest
+  val-train gap (1.24 vs 1.33): it slowed overfitting. [INFERENCE] A regularising effect of the
+  extra target, not a better LM: at 1000 steps it is no different on test. No run separates it
+  from MTP's extra 0.9M parameters.
 
 ## 2. Reasoning pipeline (verifiable addition)
 
@@ -91,10 +99,21 @@ Reading:
 | + MoE 8 × top-2 | 1.90M (0.85M) | 1.731 / 1.727 / 1.731 / 1.710 | 0.55 / 0.27 / 0.60 / 0.54 | 0.90 / 0.69 / 0.49 |
 | + CSA | 0.91M | 1.516 / 1.514 / 1.533 / 1.516 | 0.65 / 0.39 / 0.51 / 0.86 | 0.97 / 0.88 / 0.60 |
 | all V4 | 2.31M (1.26M) | 1.205 / 1.211 / 1.205 / 1.206 | 0.98 / 0.99 / 0.99 / 0.86 | 1.00 / 0.99 / 0.95 |
+| control: dense, `--d-model 176` | 1.56M | 1.684 / 1.730 / 1.672 / 1.640 | 0.49 / 0.56 / 0.62 / 0.12 | 0.87 / 0.65 / 0.45 |
+| control: all V4 without Muon (AdamW in pretrain and SFT) | 2.31M (1.26M) | 1.494 / 1.545 / 1.517 / 1.547 | 0.90 / 0.79 / 0.63 / 0.79 | 0.99 / 0.92 / 0.78 |
 
-- All V4: better on every seed, at every digit count, and its 3-digit minimum (0.86) is above the
-  dense maximum (0.71). Confound: it has 1.5× the active parameters and uses Muon, so this is the
-  bundle, not one mechanism.
+- Size does not explain the all-V4 result. A dense model larger than all V4's active parameters
+  (1.56M vs 1.26M) reaches 0.45 at 3 digits, about the same as the 0.84M dense (0.39).
+- The V4 architecture without Muon beats that larger dense model on pretrain val loss on all 4
+  seeds (1.49-1.55 vs 1.64-1.73; smallest gap 0.09, just above the dense seed spread) and on
+  3-digit accuracy on all 4 seeds (mean 0.78 vs 0.45; the smallest gap, seed 2, is 0.005, so by the
+  strict rule accuracy is not a measurable difference).
+- Muon adds a clear further gain on top: val loss 1.21 vs 1.49-1.55 on every seed, 3-digit 0.95
+  vs 0.78. Unlike on Shakespeare, the equation corpus (553k tokens of generated sums) does not
+  overfit in 1500 steps (train ≈ val for dense), so faster fitting shows up as a held-out gain.
+- CSA alone reaches about the same pretrain val loss as the whole architecture without Muon
+  (mean 1.52 vs 1.53). [INFERENCE] CSA likely carries most of the architecture gain on this task;
+  MTP and mHC were not run alone here, so that is not isolated.
 - CSA: pretrain loss clearly lower on all 4 seeds (1.52 vs 1.73); 3-digit accuracy higher on all 4
   seeds but by less than dense's own seed spread, so no measurable accuracy difference by the rule.
   [INFERENCE] The local window plus selected blocks may make digit alignment easier; not tested.
@@ -117,21 +136,23 @@ permutation null (labels swapped at random, 300 times):
 | second operand | TV 0.74, null p95 0.09 | TV 0.18, null p95 0.03 |
 | answer / trace | TV 0.17, null p95 0.03 | TV 0.13, null p95 0.02 |
 
-Experts do split by operator (p = 0.003 for most layers), most sharply in the first layer and
-right after pretraining. The specialisation does not buy accuracy here: the mixed-operator MoE
-and dense models score 0.11 and 0.12 at 3 digits after SFT (seed 0).
+The operator token itself differs between the two inputs, so its routing split is trivial, at
+least in layer 0. The informative rows are the tokens that are the same in both inputs (second
+operand, answer and trace): their routing differs above the permutation null (p = 0.003) but
+after SFT only weakly (TV 0.13-0.18). The specialisation does not buy accuracy here: the
+mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (seed 0).
 
 ## Verdicts
 
 | Part | Small-scale verdict |
 |---|---|
 | Aux-loss-free balancing | works: even load, no loss cost |
-| MoE (matched active params) | no measurable gain; overfits a small corpus faster; routes by operator |
-| Multi-token prediction | the only single part that wins on held-out LM loss (2000 steps) |
+| MoE (matched active params) | no measurable gain; overfits a small corpus faster; weak operator-dependent routing on shared tokens |
+| Multi-token prediction | no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap) |
 | mHC | no measurable difference |
 | Compressed sparse attention | lower pretrain loss on equations; overfits Shakespeare faster; no speed gain at this context |
-| Muon | fits faster, so it overfits the small corpus sooner; no held-out gain at 1000 steps |
-| All V4 together | best reasoning model (3-digit 0.95 vs 0.39), but with 1.5× active params and Muon; memorises Shakespeare |
+| Muon | on Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps); on the non-overfitting equation corpus, added on top of the V4 architecture, it gives a clear gain (val 1.21 vs 1.53, 3-digit 0.95 vs 0.78); not run alone on equations |
+| All V4 together | best reasoning model (3-digit 0.95 vs 0.39); a larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it still reaches 0.78. Memorises Shakespeare |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
 the dense model; that measures this implementation, not the architecture.
@@ -140,5 +161,6 @@ the dense model; that measures this implementation, not the architecture.
 
 - 2 seeds for pretraining, 4 for the reasoning pipeline, 1 for GRPO and routing.
 - One tiny corpus (414k training tokens) and one toy task; overfitting dominates the LM results.
-- Not compute-matched for "all V4" (6.5M vs 5.1M active on Shakespeare, 1.26M vs 0.84M on equations).
+- "All V4" is not compute-matched on Shakespeare (6.5M vs 5.1M active). On equations the larger
+  dense control (1.56M) covers size; the control has no Shakespeare counterpart.
 - Logs: `runs/logs/v4_*` (gitignored).
