@@ -119,6 +119,10 @@ from minigpt.train import (
 TINY_SHAKESPEARE_URL = (
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 )
+TINY_STORIES_URL = (
+    "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-train.txt"
+)
+TINY_STORIES_BYTES = 50_000_000  # first 50 MB of the 1.9 GB train file, ~11M tokens
 RAW_DIR = Path("data/raw")
 TOKENIZER_PATH = Path("runs/tokenizer.json")
 PRETRAIN_CKPT = Path("runs/pretrain/ckpt.pt")
@@ -155,6 +159,23 @@ def download_tinyshakespeare(raw_dir: Path = RAW_DIR) -> Path:
     return path
 
 
+def download_tinystories(raw_dir: Path = RAW_DIR, max_bytes: int = TINY_STORIES_BYTES) -> Path:
+    """Download the first `max_bytes` of the TinyStories train file, cut after the last whole
+    story; raises on network failure."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    path = raw_dir / "tinystories.txt"
+    if not path.exists():
+        req = urllib.request.Request(TINY_STORIES_URL, headers={"User-Agent": "minigpt"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            text = resp.read(max_bytes).decode("utf-8", errors="ignore")
+        eot = "<|endoftext|>"
+        text = text[: text.rindex(eot) + len(eot)]
+        tmp = path.with_suffix(".part")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    return path
+
+
 def load_tokenizer() -> BPETokenizer:
     if not TOKENIZER_PATH.exists():
         sys.exit(f"{TOKENIZER_PATH} not found: run `minigpt train-tokenizer` first")
@@ -173,6 +194,13 @@ def shakespeare_splits(tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
     return ids[:n], ids[n:]
 
 
+def tinystories_splits(tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
+    """Same 90/10 cut as tiny-Shakespeare; `<|endoftext|>` between stories is one token."""
+    ids = tokenizer.encode(download_tinystories().read_text(encoding="utf-8"), allow_special=True)
+    n = int(len(ids) * 0.9)
+    return ids[:n], ids[n:]
+
+
 def load_alpaca() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = json.loads(
         download_alpaca_data(RAW_DIR / "alpaca_1k.json").read_text("utf-8")
@@ -186,6 +214,8 @@ def cmd_data(args: argparse.Namespace) -> None:
         print(f"SMS Spam ready at {download_sms_spam(raw)}")
     elif args.dataset == "tinyshakespeare":
         print(f"tiny-Shakespeare ready at {download_tinyshakespeare(raw)}")
+    elif args.dataset == "tinystories":
+        print(f"TinyStories slice ready at {download_tinystories(raw)}")
     else:
         print(f"Alpaca 1k ready at {download_alpaca_data(raw / 'alpaca_1k.json')}")
 
@@ -260,7 +290,8 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
     tok = load_tokenizer()
-    train_ids, held_ids = shakespeare_splits(tok)
+    splits = tinystories_splits if args.corpus == "tinystories" else shakespeare_splits
+    train_ids, held_ids = splits(tok)
     val_ids, test_ids = split_val_test(held_ids)
     print(
         f"device={device} train_tokens={len(train_ids):,} "
@@ -1434,7 +1465,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("data", help="download a dataset into data/raw")
-    s.add_argument("dataset", choices=["spam", "tinyshakespeare", "alpaca"])
+    s.add_argument("dataset", choices=["spam", "tinyshakespeare", "tinystories", "alpaca"])
     s.add_argument("--dir", default=str(RAW_DIR))
     s.set_defaults(func=cmd_data)
 
@@ -1446,6 +1477,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("pretrain", help="pretrain a small GPT")
     s.add_argument("--name", default="pretrain")
+    s.add_argument(
+        "--corpus",
+        choices=["tinyshakespeare", "tinystories"],
+        default="tinyshakespeare",
+        help="pretraining text (default: tiny-Shakespeare)",
+    )
     s.add_argument("--steps", type=int, default=2000)
     s.add_argument("--batch-size", type=int, default=32)
     s.add_argument("--context-length", type=int, default=256)
