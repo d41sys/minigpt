@@ -78,9 +78,8 @@ most of the signal; 1 and 2 digits are at or near the ceiling.
 What this does and does not show:
 
 - The three recipes that remove the KL term (CISPO, DAPO, Magistral) are the three that lose
-  at 3 digits, and their KL is 1.6 to 4.6 times the `mu 4` baseline's. [INFERENCE] The KL penalty may
-  be doing useful work at this scale. No run here isolates it (for example DAPO with
-  `--beta 0.04`), so this is a hypothesis, not a result.
+  at 3 digits, and their KL is 1.6 to 4.6 times the `mu 4` baseline's. The next section tests
+  whether the missing KL term is the cause.
 - CISPO never zeroes a gradient, so with `mu 4` and no KL it keeps pushing on every token of
   every inner step. [INFERENCE] This is the likely cause of its drift, not tested.
 - One tiny task (3 digits are the only column with room), one base model, two seeds per recipe
@@ -88,6 +87,38 @@ What this does and does not show:
   anything about how the labs' recipes behave at their own scale. The recipe shapes
   follow the papers cited above; the hyperparameters (eps_high of CISPO, `N = 50` of ProRL) are
   guesses where the paper gives none.
+
+### KL isolation
+
+Four more runs change only `--beta`: GRPO `mu 4` with the KL term removed, and the three no-KL
+recipes with `--beta 0.04` restored. Same base, 200 steps, seeds 0 / 1, same verdict rule.
+
+| Run | 1-digit | 2-digit | 3-digit | KL | Verdict (3-digit) |
+|---|---|---|---|---|---|
+| GRPO `mu 4`, `--beta 0` | 1.00 / 0.96 | 0.68 / 0.64 | 0.44 / 0.52 | 0.052 / 0.034 | loses to GRPO `mu 4` with KL (0.68 / 0.60); 2-digit also loses (0.86 / 0.92) |
+| DAPO + KL | 1.00 / 1.00 | 0.92 / 0.92 | 0.82 / 0.62 | 0.028 / 0.028 | beats DAPO (0.50 / 0.52); no measurable difference to GRPO `mu 4` |
+| Magistral + KL | 1.00 / 1.00 | 0.88 / 0.90 | 0.60 / 0.38 | 0.035 / 0.028 | no measurable difference to Magistral (0.44 / 0.52); 1-digit recovers from 0.94 / 0.90 |
+| CISPO + KL | 0.82 / 0.86 | 0.60 / 0.54 | 0.36 / 0.42 | 0.042 / 0.047 | beats CISPO (0.34 / 0.10), seed 0 only by 0.02; still loses to GRPO `mu 4` |
+
+- The KL term matters here: removing it from GRPO costs 0.16 at 3 digits and 0.23 at 2 digits,
+  and restoring it in DAPO closes DAPO's whole gap to GRPO.
+- It is not the whole story. CISPO with KL still loses to GRPO, and Magistral with KL is not
+  measurably better at 3 digits. Their other changes (unclipped-gradient weighting, batch-std
+  advantage, group-length normalisation) are not isolated one by one.
+- Two seeds, n = 50 per cell, one base model. DAPO + KL seed 0 (0.82) is the single highest
+  3-digit cell in this file; one cell is not evidence that DAPO + KL beats GRPO.
+
+```bash
+minigpt grpo $B --mu 4 --beta 0 --out runs/kl_grpo_nokl/ckpt.pt
+minigpt grpo $B --mu 4 --clip-eps-high 0.28 --loss-agg token-mean --beta 0.04 --fill-batch \
+  --out runs/kl_dapo_kl/ckpt.pt
+minigpt grpo $B --mu 4 --beta 0.04 --clip-eps-high 0.28 --loss-agg group-mean \
+  --advantage batch --out runs/kl_magistral_kl/ckpt.pt
+minigpt grpo $B --mu 4 --policy-loss cispo --loss-agg token-mean --clip-eps 1.0 \
+  --clip-eps-high 0.28 --beta 0.04 --fill-batch --out runs/kl_cispo_kl/ckpt.pt
+```
+
+`$B` is defined in the Reproduce block below. Logs: `runs/logs/kl_*.log`.
 
 Reproduce (from the repo root, base checkpoint in `runs/`):
 
