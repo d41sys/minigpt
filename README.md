@@ -380,6 +380,8 @@ The second table (5 consolidation recipes) merges the `+` teacher (`runs/grpo`) 
 
 Opt-in flags copy the DeepSeek-V4 report's architecture at toy scale. Covered: DeepSeekMoE with aux-loss-free balancing (`--n-experts`), multi-token prediction (`--mtp-depth`), mHC residual streams (`--hc-streams`), compressed sparse attention with a lightning indexer (`--attn-type csa`) and the Muon optimizer (`--optimizer muon`). Defaults keep the dense model, and every post-training command runs on the new checkpoints unchanged. Ablations ran on the Korea server at 2 seeds (4 for reasoning), scoring the final-step model. Full tables and the parts left out (HCA, FP4, hash routing) are in [`docs/recipes/deepseek-v4.md`](docs/recipes/deepseek-v4.md).
 
+![minigpt toy DeepSeek-V4: token ids and embedding feed N V4 blocks of compressed sparse attention and a mixture-of-experts feed-forward layer wired through mHC residual streams, then LayerNorm and the tied LM head; the MTP head and the Muon optimizer act in training only](docs/diagrams/minigpt-v4.svg)
+
 | Part | Small-scale result |
 |---|---|
 | Aux-loss-free balancing | works: worst expert load 1.1× the mean, vs 2.2–2.8× with balancing off, at no loss cost |
