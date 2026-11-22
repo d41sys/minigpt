@@ -391,6 +391,7 @@ Opt-in flags copy the DeepSeek-V4 report's architecture at toy scale. Covered: D
 | Compressed sparse attention | equation pretrain loss 1.52 vs 1.73 on 4 seeds; TinyStories test loss 1.0% higher; overfits Shakespeare faster; no speed gain at 128–256 tokens |
 | Muon | the largest single gain on equations: on the unchanged dense model it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 (4-seed means; every Muon seed 0.95–0.97, every dense seed 0.08–0.71). A tuned AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61 (best seed 0.86), so the accuracy gain survives tuning; it needs Muon in both pretrain and SFT (one stage only: 0.75–0.78). TinyStories: test loss 3.5% lower at default rates. On Shakespeare it fits faster and overfits sooner |
 | All parts together | lowest equation val loss (1.21); 3-digit accuracy 0.95, equal to Muon alone. A larger dense control (1.56M parameters vs 1.26M active) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. TinyStories: lowest test loss, 9.4% below dense (6.2% without Muon), not size-matched. Memorises Shakespeare (train loss 0.14) |
+| Multi-teacher distillation on all parts | `opd` runs unchanged on V4 `+` and `-` teachers and a weak V4 student (2 seeds, 500 steps). On-policy lifts 1-digit accuracy only (`+` 0.10 → 0.28–0.41, `-` 0.31 → 0.75–0.77); off-policy is better on both seeds (`+` 0.66–0.84, `-` 0.89–0.95); swapping in the dense teachers changes nothing measurable. Each run takes about 6 h, 29× the dense one |
 
 ## Design decisions
 

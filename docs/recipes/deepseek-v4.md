@@ -279,6 +279,59 @@ operand, answer and trace): their routing differs above the permutation null (p 
 after SFT only weakly (TV 0.13-0.18). The specialisation does not buy accuracy here: the
 mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (seed 0).
 
+## 3. Multi-teacher distillation (MOPD) on the V4 model
+
+`opd` ran unchanged on all-V4 checkpoints (2.31M parameters), with the settings of dense E1 in
+[`consolidation.md`](consolidation.md): 500 steps, 8 tasks per step, `--lr 3e-4`, `--ops +,-`,
+estimator `full`, seeds 0 and 1.
+
+- Teachers (seed 0): the `+` teacher is `v4_rs_all_s0` plus 200 GRPO steps; the `-` teacher is
+  `reason-pretrain --ops -` → `reason-sft --ops -` → 200 GRPO steps. Greedy accuracy at 1 / 2 / 3
+  digits (n = 200): `+` 1.00 / 1.00 / 1.00, `-` 1.00 / 1.00 / 0.99; each scores at most 0.06 on
+  the other operator.
+- Student: `reason-pretrain --ops +,-` → `reason-sft --ops +,- --epochs 1 --optimizer muon`. The
+  recipe's 20,000 traces give a student that is already strong on V4 (`+` 1.00 / 1.00 / 0.78), so
+  the trace count was swept (200 to 20,000) and fixed by a rule set before the distillation runs:
+  mean 1-digit accuracy closest to the dense student's 0.31. That gave 3,000 traces: `+` 0.095 /
+  0.010 / 0.005, `-` 0.310 / 0.045 / 0.000 (n = 200).
+- Control: the same V4 student distilled on-policy from the dense teachers (`runs/grpo`,
+  `runs/sub_grpo`).
+
+Final-step student, greedy accuracy at 1 / 2 / 3 digits (n = 200). KL is the per-token reverse KL
+of the student's greedy rollouts against the run's own teachers on 200 held-out tasks.
+
+| Run | Seed | `+` | `-` | KL start → end | Wall (s) |
+|---|---|---|---|---|---|
+| on-policy, V4 teachers | 0 | 0.405 / 0.015 / 0.000 | 0.745 / 0.090 / 0.000 | 1.296 → 0.801 | 23,468 |
+| on-policy, V4 teachers | 1 | 0.280 / 0.005 / 0.000 | 0.765 / 0.030 / 0.000 | 1.320 → 0.875 | 21,443 |
+| off-policy, V4 teachers | 0 | 0.840 / 0.305 / 0.070 | 0.950 / 0.305 / 0.050 | 1.296 → 0.437 | 22,426 |
+| off-policy, V4 teachers | 1 | 0.660 / 0.235 / 0.020 | 0.885 / 0.380 / 0.025 | 1.320 → 0.480 | 22,676 |
+| control: on-policy, dense teachers | 0 | 0.490 / 0.010 / 0.000 | 0.685 / 0.035 / 0.005 | 1.290 → 0.695 | 23,166 |
+| control: on-policy, dense teachers | 1 | 0.320 / 0.035 / 0.000 | 0.755 / 0.065 / 0.010 | 1.288 → 0.799 | 20,890 |
+
+Same verdict rule as section 2 (seed ranges do not overlap; gap above 0.05 for accuracy, above
+the wider range for KL), here with 2 seeds per row.
+
+- On-policy distillation moves the V4 student, but only at 1 digit: `+` 0.095 → 0.28-0.41, `-`
+  0.31 → 0.75-0.77, KL down by 0.45-0.50. 2- and 3-digit accuracy stays within 0.05 of the start.
+- Off-policy beats on-policy on both seeds: 1- and 2-digit accuracy on both operators (gaps
+  0.12-0.26) and KL (0.44-0.48 vs 0.80-0.88). 3 digits: no measurable difference.
+- V4 teachers vs dense teachers, same student: no measurable accuracy difference. The weak
+  on-policy result follows the student, not the teachers.
+- Against dense E1 (n = 50 per cell, `consolidation.md`): the dense student gains more on `+`
+  (1 digit 0.68 / 0.68 vs 0.24-0.32; 2 digits 0.12-0.20 vs 0.02); `-` overlaps. The relative KL
+  drop is similar (dense 38-47%, V4 34-38%); absolute KL is not comparable.
+- On-policy KL first rises (1.3 → 1.8-2.3 at step 100) in all four on-policy runs, then falls and
+  is still falling at step 500. [INFERENCE] `--lr 3e-4` with a fresh AdamW is too large a step
+  for a student trained with Muon; not tested (no rate sweep, no `--optimizer muon` on `opd`,
+  no longer run). "On-policy is weak on V4" holds for these settings only.
+- Cost: 5.8-6.5 h per run, about 29× dense E1 (726-785 s), on shared GPUs. The control costs the
+  same, so the student's rollouts dominate. [INFERENCE] The cause is that CSA has no KV cache;
+  this is implementation cost.
+- Limits: one teacher pair and one student (seed 0), so the two seeds cover distillation noise
+  only. The student is 2.7× the dense student and matched to it on 1-digit accuracy only. Each
+  seed uses its own held-out tasks for KL. Logs: `runs/logs/v4m_*`.
+
 ## Verdicts
 
 | Part | Small-scale verdict |
@@ -290,13 +343,14 @@ mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (s
 | Compressed sparse attention | lower pretrain loss on equations; slightly worse on TinyStories (test +0.014); overfits Shakespeare faster; no speed gain at this context |
 | Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. Tuning AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61, so the accuracy gain is not a default-settings artefact; it needs Muon in both stages (one stage: 0.75-0.78). The val-loss gain over tuned AdamW is within AdamW's seed range. TinyStories: test −0.050 (3.5%) at default rates. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps) |
 | All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Best row on TinyStories (test −0.133, 9.4%; −0.089 without Muon), not size-matched there. Memorises Shakespeare |
+| MOPD on all V4 | runs unchanged. On-policy lifts only 1-digit accuracy in 500 steps; off-policy is better on both seeds; V4 and dense teachers give the same result. 29× the dense wall time (no KV cache in CSA) |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
 the dense model; that measures this implementation, not the architecture.
 
 ## Limits
 
-- 2 seeds for pretraining, 4 for the reasoning pipeline, 1 for GRPO and routing.
+- 2 seeds for pretraining and MOPD, 4 for the reasoning pipeline, 1 for GRPO and routing.
 - Two corpora (Shakespeare, 414k training tokens, where overfitting dominates; a 50 MB TinyStories
   slice, 18.7M tokens, one step budget) and one toy task.
 - "All V4" is not compute-matched on either corpus (6.5M vs 5.1M active). On equations the larger
