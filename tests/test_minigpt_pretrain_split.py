@@ -150,3 +150,57 @@ def test_split_halves_are_disjoint_windows() -> None:
     seen_val = {t for i in range(len(val_w)) for t in val_w[i][0].tolist()}
     seen_test = {t for i in range(len(test_w)) for t in test_w[i][0].tolist()}
     assert not seen_val & seen_test
+
+
+STORIES = "<|endoftext|>".join(f"Once upon a time {i % 5} cat sat. " * 6 for i in range(40))
+
+
+def test_download_tinystories_cuts_after_the_last_whole_story(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
+    import minigpt.cli as cli
+
+    monkeypatch.setattr(
+        cli.urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(STORIES.encode())
+    )
+    path = cli.download_tinystories(tmp_path, max_bytes=500)
+    text = path.read_text()
+    assert text.endswith("<|endoftext|>") and len(text.encode()) <= 500
+    assert STORIES.startswith(text) and not list(tmp_path.glob("*.part"))
+
+
+def test_pretrain_corpus_tinystories_trains_on_the_downloaded_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    import minigpt.cli as cli
+
+    raw = tmp_path / "raw.txt"
+    raw.write_text(STORIES)
+    seen: list[bool] = []
+
+    def encode(text: str, allow_special: bool = False) -> list[int]:
+        seen.append(allow_special)
+        return [b % 50 for b in text.encode()]
+
+    monkeypatch.chdir(tmp_path)
+    tok = types.SimpleNamespace(vocab_size=50, encode=encode)
+    monkeypatch.setattr(cli, "load_tokenizer", lambda: tok)
+    monkeypatch.setattr(cli, "download_tinystories", lambda *_a, **_k: raw)
+    monkeypatch.setattr(cli, "get_device", lambda: torch.device("cpu"))
+    assert build_parser().parse_args(["pretrain"]).corpus == "tinyshakespeare"
+    out = tmp_path / "res.json"
+    argv = [
+        "pretrain", "--name", "t", "--corpus", "tinystories", "--steps", "4", "--eval-interval",
+        "2", "--batch-size", "2", "--context-length", "8", "--d-model", "16", "--num-layers", "1",
+        "--num-heads", "2", "--results-out", str(out),
+    ]  # fmt: skip
+    args = build_parser().parse_args(argv)
+    args.func(args)
+    assert seen == [True]  # story separators are encoded as the special token
+    n = len(STORIES.encode())
+    held = n - int(n * 0.9)
+    assert len(json.loads(out.read_text())["val_window_losses"]) == (held // 2 - 1) // 8

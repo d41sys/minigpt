@@ -87,6 +87,83 @@ Reading:
   extra target, not a better LM: at 1000 steps it is no different on test. No run separates it
   from MTP's extra 0.9M parameters.
 
+## 1b. Language-model pretraining on TinyStories
+
+Section 1 mostly measures memorisation: tiny-Shakespeare has 414k training tokens and dense
+overfits by step ~1100. This repeats it on a corpus that does not overfit at the same model size.
+
+- Corpus: the first 50 MB of the TinyStories train file (`roneneldan/TinyStories`, cut after the
+  last whole story), `minigpt pretrain --corpus tinystories`. 18.7M training tokens, 1.04M val and
+  1.04M test tokens (same 90/10 cut and `split_val_test` as section 1).
+- Tokenizer: the existing 1024-token byte-level BPE (trained on Shakespeare) is reused. It covers
+  every byte, so nothing is out of vocabulary and decoding is lossless; the cost is compression,
+  2.40 bytes/token on TinyStories against 3.10 for a BPE trained on it (5 MB sample). Reusing it
+  keeps every model at the same size as section 1 and `runs/tokenizer.json` untouched. Losses are
+  per token, so they are comparable across rows here but not with section 1.
+- Budget: one dense curve (seed 0, 4000 steps, val every 250) fell at every evaluation, 1.5693
+  → 1.5595 over the last 250, and took 158 s. 4000 steps is 32.8M tokens, 1.75 epochs. The best
+  val step is the last step in all 16 runs below and val − train is 0.07-0.10 (dense on
+  Shakespeare: 0.42 at 1000 steps, 1.33 at 2000), so these runs are not in the overfitting regime.
+
+```
+minigpt pretrain --corpus tinystories --steps 4000 --eval-interval 250 --final --seed S \
+  --results-out runs/logs/ts_NAME_sS.json [flags]
+```
+
+Flags: dense none; Muon `--optimizer muon`; MoE `--n-experts 8 --n-shared-experts 1
+--moe-top-k 2`; MTP `--mtp-depth 1`; mHC `--hc-streams 4`; CSA `--attn-type csa`; all V4 = Muon +
+MoE + MTP + mHC + CSA; all V4 without Muon = the same with AdamW. Seeds 0 and 1, `--final` (the
+model as training left it). Columns as in section 1; Δ test is the change of the two-seed mean
+test loss against dense. Verdict: the two seed ranges do not overlap and the gap between them is
+larger than the wider of the two ranges (stricter than section 1's paired rule, which it implies).
+
+| Variant | Params (active) | Test loss s0 / s1 | Δ test | Val loss s0 / s1 | Train loss s0 / s1 | Val − train | Wall s s0 / s1 | Verdict test / val |
+|---|---|---|---|---|---|---|---|---|
+| dense (AdamW) | 5.07M | 1.418 / 1.420 | | 1.504 / 1.509 | 1.431 / 1.434 | 0.07 | 155 / 153 | baseline |
+| + Muon | 5.07M | 1.369 / 1.370 | −0.050 (−3.5%) | 1.458 / 1.458 | 1.378 / 1.380 | 0.08 | 257 / 254 | better / better |
+| + MoE 8 × top-2 + 1 shared | 11.39M (5.08M) | 1.345 / 1.352 | −0.071 (−5.0%) | 1.436 / 1.442 | 1.353 / 1.359 | 0.08 | 787 / 758 | better / better |
+| + MTP depth 1 | 5.99M | 1.413 / 1.413 | −0.006 (−0.4%) | 1.500 / 1.499 | 1.427 / 1.428 | 0.07 | 179 / 178 | better / none |
+| + mHC 4 streams | 5.36M | 1.396 / 1.397 | −0.023 (−1.6%) | 1.483 / 1.485 | 1.409 / 1.410 | 0.07 | 469 / 483 | better / better |
+| + CSA | 5.27M | 1.436 / 1.429 | +0.014 (+1.0%) | 1.522 / 1.517 | 1.442 / 1.438 | 0.08 | 341 / 340 | worse / worse |
+| all V4 (Muon + MoE + MTP + mHC + CSA) | 12.84M (6.53M) | 1.284 / 1.288 | −0.133 (−9.4%) | 1.376 / 1.381 | 1.274 / 1.278 | 0.10 | 2069 / 2102 | better / better |
+| all V4 without Muon | 12.84M (6.53M) | 1.331 / 1.330 | −0.089 (−6.2%) | 1.421 / 1.419 | 1.330 / 1.328 | 0.09 | 1287 / 1300 | better / better |
+
+Expert load in the last training step, worst layer, max / mean tokens per expert (1.00 = even),
+seed 0 / seed 1: MoE 1.27 / 1.17; all V4 1.33 / 1.33; all V4 without Muon 1.20 / 1.21 (section 1,
+1000 steps: 1.09-1.16).
+
+Reading:
+
+- Held-out loss, ranked by Δ test: all V4 (−0.133) > MoE (−0.071) > Muon (−0.050) > mHC (−0.023)
+  > MTP (−0.006, test only); CSA is worse (+0.014). Test and val agree on every verdict except MTP,
+  whose val gap (0.004) is below the seed spread (0.005). The MTP and mHC gains are small: the
+  MTP gap (0.005) is about 2× the seed spread (0.002), so it is at the edge of the rule.
+- Unlike section 1, parts that add capacity or speed up fitting (Muon, MoE) lower val and test loss
+  here, with a val − train gap that does not grow (0.07 → 0.08). [INFERENCE] On Shakespeare their
+  "worse" verdicts at 2000 steps were memorisation, not a worse model; on 1.75 epochs of a larger
+  corpus the same mechanisms give a better fit that generalises.
+- All V4 is the best row, and the effects are close to additive: the four architecture parts alone
+  sum to −0.086 (measured, all V4 without Muon: −0.089); Muon alone is −0.050 and adds −0.044 on
+  top of the architecture. [INFERENCE] The parts do not interfere at this size. CSA hurts on its
+  own yet all V4 still wins; the part-by-part ablation (all minus one) was not run.
+- Muon lowers test loss 3.5% at 1.7× dense's wall time. Its learning rate and AdamW's were not
+  tuned, so this is the default-settings comparison only.
+- MoE's gain is at matched active parameters (5.08M vs 5.07M) but with 2.2× the total; dense
+  capacity matched on total parameters was not run, so "routing helps" and "more weights help" are
+  not separated. Aux-loss-free balancing keeps the worst layer within 1.17-1.33× of even.
+
+Limits of this table:
+
+- Two seeds change initialisation and batch order only (spreads up to 0.007); they do not cover
+  corpus slice, learning rate or budget. One slice (first 50 MB), one budget (4000 steps, 1.75
+  epochs). The budget was chosen from a single dense seed-0 curve.
+- "All V4" is not compute-matched (6.53M active vs 5.07M, 12.84M total) and there is no larger
+  dense control on this corpus, so size explains some unknown share of its −0.133.
+- Wall times come from a GPU shared with other jobs (it showed 98% utilisation from other users'
+  processes before the first run); the two seeds agree within 3%, but compare ratios, not seconds.
+  The toy MoE, mHC and CSA are unfused PyTorch loops: 13× dense for all V4.
+- Logs: `runs/logs/ts_*` (gitignored); the dense curve is `ts_curve_dense_s0`.
+
 ## 2. Reasoning pipeline (verifiable addition)
 
 `v4rp.sh`: `reason-pretrain` (1500 steps, default 0.84M dense) → `reason-sft --n 10000 --epochs 3`
