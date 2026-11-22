@@ -284,12 +284,12 @@ mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (s
 | Part | Small-scale verdict |
 |---|---|
 | Aux-loss-free balancing | works: even load, no loss cost |
-| MoE (matched active params) | no measurable gain; overfits a small corpus faster; weak operator-dependent routing on shared tokens |
-| Multi-token prediction | Shakespeare: no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap). Equations: no measurable difference |
-| mHC | no measurable difference on either task |
-| Compressed sparse attention | lower pretrain loss on equations; overfits Shakespeare faster; no speed gain at this context |
+| MoE (matched active params) | TinyStories: test loss −0.071 (5.0%) on both seeds, at 2.2× the total parameters (no dense control of that size). Shakespeare: overfits faster. Equations: no measurable gain; weak operator-dependent routing on shared tokens |
+| Multi-token prediction | TinyStories: test −0.006, at the edge of the rule, no difference on val. Shakespeare: no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap). Equations: no measurable difference |
+| mHC | TinyStories: small gain, test −0.023 (1.6%) on both seeds. No measurable difference on Shakespeare or equations |
+| Compressed sparse attention | lower pretrain loss on equations; slightly worse on TinyStories (test +0.014); overfits Shakespeare faster; no speed gain at this context |
 | Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. Tuning AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61, so the accuracy gain is not a default-settings artefact; it needs Muon in both stages (one stage: 0.75-0.78). The val-loss gain over tuned AdamW is within AdamW's seed range. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps) |
-| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Memorises Shakespeare |
+| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Best row on TinyStories (test −0.133, 9.4%; −0.089 without Muon), not size-matched there. Memorises Shakespeare |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
 the dense model; that measures this implementation, not the architecture.
@@ -297,9 +297,10 @@ the dense model; that measures this implementation, not the architecture.
 ## Limits
 
 - 2 seeds for pretraining, 4 for the reasoning pipeline, 1 for GRPO and routing.
-- One tiny corpus (414k training tokens) and one toy task; overfitting dominates the LM results.
-- "All V4" is not compute-matched on Shakespeare (6.5M vs 5.1M active). On equations the larger
-  dense control (1.56M) covers size; the control has no Shakespeare counterpart.
+- Two corpora (Shakespeare, 414k training tokens, where overfitting dominates; a 50 MB TinyStories
+  slice, 18.7M tokens, one step budget) and one toy task.
+- "All V4" is not compute-matched on either corpus (6.5M vs 5.1M active). On equations the larger
+  dense control (1.56M) covers size; the control has no language-model counterpart.
 - AdamW was tuned one setting at a time (pretrain rate, SFT rate, steps) plus one combined row,
   not on a joint grid; Muon was not tuned at all.
 - Logs: `runs/logs/v4_*` (gitignored).

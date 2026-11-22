@@ -378,19 +378,19 @@ The second table (5 consolidation recipes) merges the `+` teacher (`runs/grpo`) 
 
 ### Toy DeepSeek-V4 architecture
 
-Opt-in flags copy the DeepSeek-V4 report's architecture at toy scale. Covered: DeepSeekMoE with aux-loss-free balancing (`--n-experts`), multi-token prediction (`--mtp-depth`), mHC residual streams (`--hc-streams`), compressed sparse attention with a lightning indexer (`--attn-type csa`) and the Muon optimizer (`--optimizer muon`). Defaults keep the dense model, and every post-training command runs on the new checkpoints unchanged. Ablations ran on the Korea server at 2 seeds (4 for reasoning), scoring the final-step model. Full tables and the parts left out (HCA, FP4, hash routing) are in [`docs/recipes/deepseek-v4.md`](docs/recipes/deepseek-v4.md).
+Opt-in flags copy the DeepSeek-V4 report's architecture at toy scale. Covered: DeepSeekMoE with aux-loss-free balancing (`--n-experts`), multi-token prediction (`--mtp-depth`), mHC residual streams (`--hc-streams`), compressed sparse attention with a lightning indexer (`--attn-type csa`) and the Muon optimizer (`--optimizer muon`). Defaults keep the dense model, and every post-training command runs on the new checkpoints unchanged. Ablations ran on the Korea server at 2 seeds (4 for reasoning), scoring the final-step model. Language-model runs use tiny-Shakespeare, which overfits, and a 50 MB TinyStories slice (`pretrain --corpus tinystories`), which does not. Full tables and the parts left out (HCA, FP4, hash routing) are in [`docs/recipes/deepseek-v4.md`](docs/recipes/deepseek-v4.md).
 
 ![minigpt toy DeepSeek-V4: token ids and embedding feed N V4 blocks of compressed sparse attention and a mixture-of-experts feed-forward layer wired through mHC residual streams, then LayerNorm and the tied LM head; the MTP head and the Muon optimizer act in training only](docs/diagrams/minigpt-v4.svg)
 
 | Part | Small-scale result |
 |---|---|
 | Aux-loss-free balancing | works: worst expert load 1.1× the mean, vs 2.2–2.8× with balancing off, at no loss cost |
-| MoE at matched active parameters | no measurable gain; overfits tiny-Shakespeare faster; routing on tokens shared by `+` and `-` inputs differs only weakly after SFT (TV 0.13–0.18) |
-| Multi-token prediction | Shakespeare: no difference on test loss at 1000 steps; at 2000 steps, past the overfitting point, it slows overfitting (test 3.76 vs 3.84, smallest train–val gap). Equations: no measurable difference |
-| mHC | no measurable difference on either task |
-| Compressed sparse attention | equation pretrain loss 1.52 vs 1.73 on 4 seeds; overfits Shakespeare faster; no speed gain at 128–256 tokens |
-| Muon | the largest single gain on equations: on the unchanged dense model it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 (4-seed means; every Muon seed 0.95–0.97, every dense seed 0.08–0.71). A tuned AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61 (best seed 0.86), so the accuracy gain survives tuning; it needs Muon in both pretrain and SFT (one stage only: 0.75–0.78). On Shakespeare it fits faster and overfits sooner |
-| All parts together | lowest equation val loss (1.21); 3-digit accuracy 0.95, equal to Muon alone. A larger dense control (1.56M parameters vs 1.26M active) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Memorises Shakespeare (train loss 0.14) |
+| MoE at matched active parameters | TinyStories: test loss 5.0% lower on both seeds, with 2.2× the total parameters and no dense control of that size. No measurable gain on equations; overfits tiny-Shakespeare faster; routing on tokens shared by `+` and `-` inputs differs only weakly after SFT (TV 0.13–0.18) |
+| Multi-token prediction | TinyStories: test loss 0.4% lower, at the edge of the verdict rule. Shakespeare: no difference on test loss at 1000 steps; at 2000 steps, past the overfitting point, it slows overfitting (test 3.76 vs 3.84, smallest train–val gap). Equations: no measurable difference |
+| mHC | TinyStories: test loss 1.6% lower on both seeds. No measurable difference on Shakespeare or equations |
+| Compressed sparse attention | equation pretrain loss 1.52 vs 1.73 on 4 seeds; TinyStories test loss 1.0% higher; overfits Shakespeare faster; no speed gain at 128–256 tokens |
+| Muon | the largest single gain on equations: on the unchanged dense model it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 (4-seed means; every Muon seed 0.95–0.97, every dense seed 0.08–0.71). A tuned AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61 (best seed 0.86), so the accuracy gain survives tuning; it needs Muon in both pretrain and SFT (one stage only: 0.75–0.78). TinyStories: test loss 3.5% lower at default rates. On Shakespeare it fits faster and overfits sooner |
+| All parts together | lowest equation val loss (1.21); 3-digit accuracy 0.95, equal to Muon alone. A larger dense control (1.56M parameters vs 1.26M active) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. TinyStories: lowest test loss, 9.4% below dense (6.2% without Muon), not size-matched. Memorises Shakespeare (train loss 0.14) |
 
 ## Design decisions
 
