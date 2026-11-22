@@ -200,10 +200,8 @@ loss. Per-seed comparisons are given as description only.
   Muon 0.02.
 - Muon alone matches all V4 on accuracy (0.96 vs 0.95); accuracy is near its ceiling for both. On
   val loss the two gains roughly add: Muon −0.27, architecture −0.20, both −0.52 (1.73 → 1.21).
-- Limit of the Muon result: the AdamW learning rate was not tuned and dense is still improving at
-  step 1500 (train ≈ val). [INFERENCE] Muon may mainly train faster; a tuned AdamW or more steps
-  might close the gap. Not tested. On Shakespeare, which overfits, the same speed-up gave no
-  held-out gain.
+- The AdamW settings in this table are the untuned defaults. The next section tunes AdamW in
+  both stages; Muon in both stages still wins on accuracy.
 - MTP alone: no measurable difference (val loss and accuracy ranges overlap dense; 3-digit
   accuracy higher on 3 seeds, lower on 1). mHC alone: no measurable difference (val loss higher
   on all 4 seeds by 0.005-0.014, ranges overlap; 3-digit accuracy higher on 2 seeds, lower on 2).
@@ -216,6 +214,48 @@ loss. Per-seed comparisons are given as description only.
   [INFERENCE] The local window plus selected blocks may make digit alignment easier; not tested.
 - MoE at matched active params: no measurable difference in loss or accuracy.
 - The dense SFT result swings 0.08-0.71 across seeds at 3 digits, which is why 4 seeds were used.
+
+### Muon against a tuned AdamW
+
+Same dense 0.84M model and pipeline, seeds 0-3. Only the optimizer settings change. Defaults:
+AdamW `--lr 1e-3` for 1500 pretrain steps, AdamW `--lr 5e-4` in SFT. Muon keeps its default
+settings in every row. Accuracy cells are rounded half up from 200 tasks.
+
+| Pretrain | SFT | Pretrain final val loss, s0-s3 | 3 digits, s0 / s1 / s2 / s3 | 1 / 2 / 3 digits, mean |
+|---|---|---|---|---|
+| AdamW (default) | AdamW (default) | 1.721 / 1.733 / 1.737 / 1.726 | 0.08 / 0.31 / 0.46 / 0.71 | 0.88 / 0.66 / 0.39 |
+| AdamW `--lr 5e-4` | AdamW | 1.737 / 1.749 / 1.745 / 1.740 | 0.59 / 0.53 / 0.55 / 0.54 | 0.88 / 0.77 / 0.55 |
+| AdamW `--lr 2e-3` | AdamW | 1.558 / 1.713 / 1.724 / 1.696 | 0.21 / 0.37 / 0.04 / 0.25 | 0.86 / 0.56 / 0.21 |
+| AdamW `--lr 4e-3` | AdamW | 1.642 / 1.601 / 1.702 / 1.575 | 0.10 / 0.02 / 0.01 / 0.01 | 0.67 / 0.22 / 0.03 |
+| AdamW `--lr 8e-3` | AdamW | 1.743 / 1.770 / 1.757 / 1.730 | 0.00 / 0.00 / 0.01 / 0.00 | 0.19 / 0.01 / 0.00 |
+| AdamW `--steps 3000` | AdamW | 1.518 / 1.555 / 1.686 / 1.536 | 0.86 / 0.83 / 0.35 / 0.35 | 0.96 / 0.81 / 0.60 |
+| AdamW | AdamW `--lr 2.5e-4` | as default | 0.02 / 0.00 / 0.08 / 0.04 | 0.70 / 0.23 / 0.03 |
+| AdamW | AdamW `--lr 1e-3` | as default | 0.61 / 0.59 / 0.61 / 0.61 | 0.96 / 0.79 / 0.60 |
+| AdamW | AdamW `--lr 2e-3` | as default | 0.43 / 0.18 / 0.53 / 0.04 | 0.89 / 0.61 / 0.29 |
+| AdamW `--steps 3000` | AdamW `--lr 1e-3` | 1.518 / 1.555 / 1.686 / 1.536 | 0.79 / 0.59 / 0.59 / 0.48 | 0.90 / 0.85 / 0.61 |
+| AdamW | Muon | as default | 0.75 / 0.82 / 0.73 / 0.82 | 0.99 / 0.94 / 0.78 |
+| Muon | AdamW | 1.441 / 1.485 / 1.453 / 1.448 | 0.81 / 0.64 / 0.65 / 0.90 | 0.99 / 0.87 / 0.75 |
+| Muon | Muon | 1.441 / 1.485 / 1.453 / 1.448 | 0.97 / 0.97 / 0.97 / 0.95 | 1.00 / 0.99 / 0.96 |
+
+- Accuracy: Muon in both stages beats every AdamW setting tried. The best AdamW rows reach a
+  3-digit mean of 0.60-0.61; the closest range is 0.35-0.86 (3000 steps), a gap of 0.09 to Muon's
+  0.95-0.97. Against the combined row (3000 steps, SFT `--lr 1e-3`, 0.48-0.79) the gap is 0.17.
+- Both stages contribute. Muon in SFT only (0.73-0.82) beats the best AdamW SFT rate on the same
+  base (0.59-0.61, gap 0.12). Muon in both stages beats Muon in SFT only (gap 0.14) and Muon in
+  pretrain only (0.64-0.90, gap 0.055, just above the 0.05 threshold).
+- One-stage Muon is not measurably better than the best AdamW: both one-stage ranges overlap the
+  3000-step rows.
+- Pretrain val loss: every Muon seed is below every AdamW seed at every rate, and below AdamW
+  with twice the steps (1.44-1.49 vs 1.52-1.69). The gap (0.03) is smaller than AdamW's own seed
+  range (0.17), so by the rule above this is not a measurable loss difference against tuned
+  AdamW. Against the default it is (previous section).
+- Pretrain val loss does not predict accuracy after SFT. `--lr 4e-3` has lower val loss than the
+  default on every seed and a 3-digit mean of 0.03; `--lr 5e-4` has the highest val loss of the
+  working rows and the steadiest AdamW accuracy from a 1500-step base (0.53-0.59).
+- The default SFT rate was a poor AdamW setting: `--lr 1e-3` lifts the mean 0.39 → 0.60 and
+  shrinks the seed spread 0.63 → 0.02. Combining it with 3000 pretrain steps adds nothing (0.61).
+- Not done: a joint grid over both AdamW rates, AdamW weight decay or schedule, and any tuning
+  of Muon. More than 3000 AdamW pretrain steps were not tried.
 
 GRPO, 200 steps from each seed-0 SFT checkpoint (one seed, so indicative only), 3-digit accuracy:
 dense 0.08 → 0.06, MoE 0.54 → 0.94, CSA 0.60 → 0.98. RL needs a base that already solves some
@@ -244,12 +284,12 @@ mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (s
 | Part | Small-scale verdict |
 |---|---|
 | Aux-loss-free balancing | works: even load, no loss cost |
-| MoE (matched active params) | no measurable gain; overfits a small corpus faster; weak operator-dependent routing on shared tokens |
-| Multi-token prediction | Shakespeare: no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap). Equations: no measurable difference |
-| mHC | no measurable difference on either task |
-| Compressed sparse attention | lower pretrain loss on equations; overfits Shakespeare faster; no speed gain at this context |
-| Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps). AdamW's learning rate was not tuned |
-| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Memorises Shakespeare |
+| MoE (matched active params) | TinyStories: test loss −0.071 (5.0%) on both seeds, at 2.2× the total parameters (no dense control of that size). Shakespeare: overfits faster. Equations: no measurable gain; weak operator-dependent routing on shared tokens |
+| Multi-token prediction | TinyStories: test −0.006, at the edge of the rule, no difference on val. Shakespeare: no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap). Equations: no measurable difference |
+| mHC | TinyStories: small gain, test −0.023 (1.6%) on both seeds. No measurable difference on Shakespeare or equations |
+| Compressed sparse attention | lower pretrain loss on equations; slightly worse on TinyStories (test +0.014); overfits Shakespeare faster; no speed gain at this context |
+| Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. Tuning AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61, so the accuracy gain is not a default-settings artefact; it needs Muon in both stages (one stage: 0.75-0.78). The val-loss gain over tuned AdamW is within AdamW's seed range. TinyStories: test −0.050 (3.5%) at default rates. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps) |
+| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Best row on TinyStories (test −0.133, 9.4%; −0.089 without Muon), not size-matched there. Memorises Shakespeare |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
 the dense model; that measures this implementation, not the architecture.
@@ -257,8 +297,10 @@ the dense model; that measures this implementation, not the architecture.
 ## Limits
 
 - 2 seeds for pretraining, 4 for the reasoning pipeline, 1 for GRPO and routing.
-- One tiny corpus (414k training tokens) and one toy task; overfitting dominates the LM results.
-- "All V4" is not compute-matched on Shakespeare (6.5M vs 5.1M active). On equations the larger
-  dense control (1.56M) covers size; the control has no Shakespeare counterpart.
-- AdamW's learning rate was not tuned, so "Muon beats AdamW" holds for the default settings only.
+- Two corpora (Shakespeare, 414k training tokens, where overfitting dominates; a 50 MB TinyStories
+  slice, 18.7M tokens, one step budget) and one toy task.
+- "All V4" is not compute-matched on either corpus (6.5M vs 5.1M active). On equations the larger
+  dense control (1.56M) covers size; the control has no language-model counterpart.
+- AdamW was tuned one setting at a time (pretrain rate, SFT rate, steps) plus one combined row,
+  not on a joint grid; Muon was not tuned at all.
 - Logs: `runs/logs/v4_*` (gitignored).

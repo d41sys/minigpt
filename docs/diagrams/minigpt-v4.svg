@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 388" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-v4-title minigpt-v4-desc" id="minigpt-v4-root">
+<title id="minigpt-v4-title">minigpt toy DeepSeek-V4 architecture</title>
+<desc id="minigpt-v4-desc">Token ids are embedded and pass through N V4 blocks: compressed sparse attention, then a mixture-of-experts feed-forward layer, both wired through mHC residual streams; a final LayerNorm and tied LM head give next-token logits. In training only, a multi-token-prediction head adds a loss for token t+2 and the Muon optimizer updates the 2-D block weights.</desc>
+<defs>
+<style>
+#minigpt-v4-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
+#minigpt-v4-root .s { fill: #59636e; font-size: 9px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; }
+#minigpt-v4-root .leg { fill: #59636e; font-size: 9px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+#minigpt-v4-root .cap { fill: #59636e; font-size: 8px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; letter-spacing: 0.14em; }
+#minigpt-v4-root .mask { fill: #ffffff; }
+#minigpt-v4-root .region { fill: #1f2328; fill-opacity: 0.02; stroke: #1f2328; stroke-width: 0.8; stroke-opacity: 0.10; }
+#minigpt-v4-root .stage { fill: #ffffff; stroke: #1f2328; stroke-width: 1; }
+#minigpt-v4-root .train { fill: #ffffff; stroke: #1f2328; stroke-width: 1; stroke-dasharray: 4 3; }
+#minigpt-v4-root .data { fill: #1f2328; fill-opacity: 0.05; stroke: #59636e; stroke-width: 1; }
+#minigpt-v4-root .a { fill: none; stroke: #59636e; stroke-width: 1.2; marker-end: url(#minigpt-v4-arrow); }
+#minigpt-v4-root .w { fill: none; stroke: #59636e; stroke-width: 1.2; }
+</style>
+<marker id="minigpt-v4-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#59636e"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<rect class="region" x="328" y="32" width="304" height="176" rx="8"/>
+<text class="cap" x="480" y="50" text-anchor="middle">V4 BLOCK · REPEATED N TIMES</text>
+<path class="a" d="M 160,92 L 192,92"/>
+<path class="a" d="M 312,92 L 344,92"/>
+<path class="a" d="M 464,92 L 496,92"/>
+<path class="a" d="M 616,92 L 648,92"/>
+<path class="a" d="M 768,92 L 800,92"/>
+<path class="w" d="M 404,120 L 404,148"/>
+<path class="w" d="M 556,120 L 556,148"/>
+<path class="a" d="M 708,120 L 708,252"/>
+<path class="a" d="M 480,252 L 480,208"/>
+<rect class="mask" x="40" y="64" width="120" height="56" rx="6"/>
+<rect class="data" x="40" y="64" width="120" height="56" rx="6"/>
+<text class="n" x="100" y="90">token ids</text>
+<text class="s" x="100" y="106">context ≤ 256</text>
+<rect class="mask" x="192" y="64" width="120" height="56" rx="6"/>
+<rect class="data" x="192" y="64" width="120" height="56" rx="6"/>
+<text class="n" x="252" y="90">embedding</text>
+<text class="s" x="252" y="106">token + position</text>
+<rect class="stage" x="344" y="64" width="120" height="56" rx="6"/>
+<text class="n" x="404" y="90">sparse attention</text>
+<text class="s" x="404" y="106">top-k + window</text>
+<rect class="stage" x="496" y="64" width="120" height="56" rx="6"/>
+<text class="n" x="556" y="90">MoE FFN</text>
+<text class="s" x="556" y="106">top-2 of 8, balanced</text>
+<rect class="stage" x="344" y="148" width="272" height="44" rx="6"/>
+<text class="n" x="480" y="168">mHC residual streams</text>
+<text class="s" x="480" y="183">4 streams, doubly stochastic mixing</text>
+<rect class="mask" x="648" y="64" width="120" height="56" rx="6"/>
+<rect class="data" x="648" y="64" width="120" height="56" rx="6"/>
+<text class="n" x="708" y="90">LN + LM head</text>
+<text class="s" x="708" y="106">tied to embedding</text>
+<rect class="mask" x="800" y="64" width="120" height="56" rx="6"/>
+<rect class="data" x="800" y="64" width="120" height="56" rx="6"/>
+<text class="n" x="860" y="90">logits</text>
+<text class="s" x="860" y="106">token t+1</text>
+<rect class="train" x="420" y="252" width="120" height="56" rx="6"/>
+<text class="n" x="480" y="278">Muon</text>
+<text class="s" x="480" y="294">2-D block weights</text>
+<rect class="train" x="648" y="252" width="120" height="56" rx="6"/>
+<text class="n" x="708" y="278">MTP head</text>
+<text class="s" x="708" y="294">loss on token t+2</text>
+<line x1="40" y1="340" x2="920" y2="340" stroke="#1f2328" stroke-width="0.8" stroke-opacity="0.10"/>
+<text class="cap" x="40" y="360">LEGEND</text>
+<rect class="data" x="120" y="352" width="24" height="12" rx="2"/>
+<text class="leg" x="152" y="361">same as the dense model</text>
+<rect class="stage" x="320" y="352" width="24" height="12" rx="2"/>
+<text class="leg" x="352" y="361">V4 part</text>
+<rect class="train" x="520" y="352" width="24" height="12" rx="2"/>
+<text class="leg" x="552" y="361">V4 part, training only</text>
+</svg>

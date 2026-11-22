@@ -122,7 +122,7 @@ TINY_SHAKESPEARE_URL = (
 TINY_STORIES_URL = (
     "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-train.txt"
 )
-TINY_STORIES_BYTES = 50_000_000  # first 50 MB of the 1.9 GB train file, ~11M tokens
+TINY_STORIES_BYTES = 50_000_000  # first 50 MB of the 1.9 GB train file, ~21M tokens
 RAW_DIR = Path("data/raw")
 TOKENIZER_PATH = Path("runs/tokenizer.json")
 PRETRAIN_CKPT = Path("runs/pretrain/ckpt.pt")
