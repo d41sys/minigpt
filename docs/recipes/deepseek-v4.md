@@ -231,9 +231,11 @@ loss. Per-seed comparisons are given as description only.
   vs 0.08-0.71, gap 0.16). Muon also removes the seed lottery: dense spans 0.63 at 3 digits,
   Muon 0.02.
 - Muon alone matches all V4 on accuracy (0.96 vs 0.95); accuracy is near its ceiling for both. On
-  val loss under Muon, the V4 architecture buys about what extra dense width does: Muon dense
-  0.84M 1.46, 2.33M 1.21, all V4 1.21. Under Muon, size is a measurable gain (0.84M vs 1.56M
-  ranges 1.44-1.49 vs 1.23-1.25, gap 0.20). Logs: `runs/logs/v4_r?_d*muon_s*`.
+  val loss under Muon, dense width alone reproduces the all-V4 result: Muon dense 0.84M 1.46,
+  1.56M 1.23, 2.33M 1.21, all V4 1.21. Under Muon, size is a measurable gain (0.84M vs 1.56M
+  ranges 1.44-1.49 vs 1.23-1.25, gap 0.20). An architecture gain is shown only under AdamW,
+  against a dense model above V4's active but below its total size (above).
+  Logs: `runs/logs/v4_r?_d*muon_s*`.
 - The AdamW settings in this table are the untuned defaults. The next section tunes AdamW in
   both stages; Muon in both stages still wins on accuracy.
 - MTP alone: no measurable difference (val loss and accuracy ranges overlap dense; 3-digit
