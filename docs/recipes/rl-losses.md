@@ -2,7 +2,7 @@
 
 GRPO (DeepSeek) is the repo's RL baseline. This page adds the loss / advantage / reference
 choices that other labs published on top of it, each behind a flag of `minigpt grpo`, and runs
-each at seeds 0 and 1 on the same task. All flags default to the old behaviour.
+each at seeds 0 to 3 on the same task. All flags default to the old behaviour.
 
 Setup for every run: the addition task (1 to 3 digits), start from the
 medium SFT base `runs/reason_sft_n10000e3` (greedy 0.68 / 0.62 / 0.30 on 1 / 2 / 3 digits),
@@ -39,74 +39,70 @@ Two honest notes on what can differ at all:
 ## Results
 
 Greedy accuracy on the fixed eval tasks after RL (50 tasks per digit count, so about +-0.07 per
-cell). Every cell shows seed 0 / seed 1; the shared default baseline also has seed 2. The base
-starts at 0.68 / 0.62 / 0.30.
+cell). Seeds 0 to 3 for every recipe; the shared `mu 1` default baseline has seeds 0 to 2. The
+base starts at 0.68 / 0.62 / 0.30.
 
-- `tokens`: mean greedy completion length over all 1 to 5 digit eval tasks (the base is 49.5).
-- `train acc`: mean sampled-completion accuracy over the logged steps 100 to 190.
-- `KL`: mean k3 KL to the reference over the logged steps 10 to 190. The step-0 line is left
-  out: it is large only for the `--beta 0` runs and is not meaningful.
-- `wall`: seconds on one shared, busy GPU, so only roughly comparable.
+- `KL`: mean k3 KL to the reference over the logged steps 10 to 190, averaged over seeds. The
+  step-0 line is left out: it is large only for the `--beta 0` runs and is not meaningful.
+- Mean greedy completion length (49.3 to 52.3 tokens on every run, against the base's 49.5) and
+  train accuracy (seed means 0.53 to 0.58 in this table, except CISPO's 0.35) do not separate the
+  recipes and are not shown.
 
-| Recipe | 1-digit | 2-digit | 3-digit | tokens | train acc | KL | wall (s) |
-|---|---|---|---|---|---|---|---|
-| GRPO default (`mu 1`, shared baseline), seeds 0 / 1 / 2 | 1.00 / 1.00 / 1.00 | 0.96 / 0.92 / 0.90 | 0.76 / 0.74 / 0.74 | 51.1 / 51.6 / 50.3 | 0.58 / 0.58 / 0.56 | 0.021 / 0.022 / 0.018 | 273 / 274 / 272 |
-| GRPO `mu 4` | 1.00 / 1.00 | 0.86 / 0.92 | 0.68 / 0.60 | 50.4 / 49.3 | 0.51 / 0.60 | 0.031 / 0.025 | 322 / 292 |
-| GSPO | 1.00 / 0.94 | 0.96 / 0.94 | 0.66 / 0.66 | 50.6 / 51.2 | 0.58 / 0.62 | 0.020 / 0.019 | 284 / 284 |
-| CISPO | 0.80 / 0.74 | 0.84 / 0.28 | 0.34 / 0.10 | 50.5 / 51.6 | 0.36 / 0.34 | 0.095 / 0.116 | 519 / 537 |
-| DAPO | 0.98 / 1.00 | 0.82 / 0.86 | 0.50 / 0.52 | 50.3 / 49.5 | 0.58 / 0.55 | 0.057 / 0.039 | 479 / 478 |
-| Magistral | 0.94 / 0.90 | 0.86 / 0.88 | 0.44 / 0.52 | 50.5 / 51.3 | 0.52 / 0.57 | 0.058 / 0.042 | 293 / 356 |
-| RLOO (`mu 1`) | 0.90 / 1.00 | 0.84 / 0.94 | 0.76 / 0.78 | 51.7 / 50.9 | 0.56 / 0.60 | 0.018 / 0.016 | 272 / 289 |
-| ProRL | 1.00 / 1.00 | 0.88 / 0.80 | 0.54 / 0.66 | 50.4 / 50.5 | 0.53 / 0.56 | 0.020 / 0.021 | 316 / 288 |
+| Recipe | Mean 1 / 2 / 3 digits | 3-digit, seeds 0 / 1 / 2 / 3 | KL | Verdict vs its baseline |
+|---|---|---|---|---|
+| GRPO default (`mu 1`, shared baseline) | 1.00 / 0.93 / 0.75 | 0.76 / 0.74 / 0.74 (3 seeds) | 0.020 | baseline for RLOO |
+| GRPO `mu 4` | 0.98 / 0.88 / 0.57 | 0.68 / 0.60 / 0.50 / 0.50 | 0.029 | baseline for the rest; loses to `mu 1` at 3 digits (gap 0.18) |
+| GSPO | 0.98 / 0.92 / 0.67 | 0.66 / 0.66 / 0.70 / 0.66 | 0.020 | no measurable difference |
+| CISPO | 0.78 / 0.51 / 0.19 | 0.34 / 0.10 / 0.16 / 0.16 | 0.102 | loses at 2 and 3 digits |
+| DAPO | 0.98 / 0.84 / 0.54 | 0.50 / 0.52 / 0.62 / 0.52 | 0.048 | no measurable difference |
+| Magistral | 0.91 / 0.86 / 0.53 | 0.44 / 0.52 / 0.66 / 0.48 | 0.066 | no measurable difference |
+| RLOO (`mu 1`) | 0.98 / 0.92 / 0.73 | 0.76 / 0.78 / 0.64 / 0.72 | 0.017 | no measurable difference |
+| ProRL | 0.98 / 0.80 / 0.58 | 0.54 / 0.66 / 0.54 / 0.56 | 0.021 | no measurable difference |
 
-Verdict rule: a recipe "beats" or "loses to" its baseline only if both of its seeds are on the
-same side of both baseline seeds and the seed-mean gap is above 0.07 (the n = 50 noise).
-Otherwise: no measurable difference. The baseline is `GRPO default` for RLOO (same `mu 1`) and
-`GRPO mu 4` for everything else (same `mu 4`). The 3-digit column is the hardest and carries
-most of the signal; 1 and 2 digits are at or near the ceiling.
-
-| Recipe | Verdict vs its baseline | Evidence |
-|---|---|---|
-| `mu 4` vs `mu 1` | loses (3-digit, weakly) | 3-digit 0.68 / 0.60 vs 0.76 / 0.74 / 0.74 (mean gap 0.11, just above the noise); 1 and 2 digits within noise. This is why the other recipes are compared to `mu 4` |
-| GSPO | no measurable difference | 3-digit 0.66 vs 0.64, 2-digit 0.95 vs 0.89 (gap 0.06, below 0.07); KL and train acc unchanged |
-| CISPO | loses | 3-digit 0.34 / 0.10 vs 0.68 / 0.60, train acc 0.36 / 0.34 vs 0.51 / 0.60, KL 4x higher, 2-digit collapses on seed 1 (0.28) |
-| DAPO | loses (3-digit) | 3-digit 0.50 / 0.52 vs 0.68 / 0.60, 2-digit 0.82 / 0.86 vs 0.86 / 0.92; train acc matches the baseline; 1.6x wall time from the extra sampling |
-| Magistral | loses (3-digit) | 3-digit 0.44 / 0.52 vs 0.68 / 0.60, 1-digit 0.94 / 0.90 vs 1.00 / 1.00 |
-| RLOO | no measurable difference | 3-digit 0.76 / 0.78 vs 0.76 / 0.74; 1-digit seed 0 is 0.90 vs 1.00 (noise, seed 1 is 1.00) |
-| ProRL | no measurable difference | 3-digit 0.54 / 0.66 vs 0.68 / 0.60; KL and train acc equal to the baseline |
+Verdict rule, fixed before seeds 2 and 3 were run: a recipe "beats" or "loses to" its baseline
+in a column only if none of its seed values overlaps any baseline seed value (ties count as
+overlap) and the seed-mean gap is above 0.07 (the n = 50 noise). Otherwise: no measurable
+difference. The baseline is `GRPO default` for RLOO (same `mu 1`) and `GRPO mu 4` for everything
+else (same `mu 4`). The 3-digit column carries most of the signal; 1 and 2 digits are at or near
+the ceiling.
 
 What this does and does not show:
 
-- The three recipes that remove the KL term (CISPO, DAPO, Magistral) are the three that lose
-  at 3 digits, and their KL is 1.6 to 4.6 times the `mu 4` baseline's. The next section tests
-  whether the missing KL term is the cause.
-- CISPO never zeroes a gradient, so with `mu 4` and no KL it keeps pushing on every token of
-  every inner step. [INFERENCE] This is the likely cause of its drift, not tested.
-- One tiny task (3 digits are the only column with room), one base model, two seeds per recipe
-  (three for the default baseline), 200 steps. These are one-run toy results. They do not say
-  anything about how the labs' recipes behave at their own scale. The recipe shapes
-  follow the papers cited above; the hyperparameters (eps_high of CISPO, `N = 50` of ProRL) are
-  guesses where the paper gives none.
+- Only CISPO loses (2-digit 0.28-0.84 vs 0.86-0.92, 3-digit 0.10-0.34 vs 0.50-0.68), with 3.5
+  times the baseline's KL. CISPO never zeroes a gradient, so with `mu 4` it keeps pushing on
+  every token of every inner step. [INFERENCE] This is the likely cause of its drift, not tested.
+- The first version of this table used seeds 0 and 1 only and also had DAPO and Magistral losing
+  at 3 digits. Seeds 2 and 3 of GRPO `mu 4` scored 0.50 / 0.50 against 0.68 / 0.60 for seeds 0
+  and 1, so that pair was the baseline's luckiest; with 4 seeds DAPO and Magistral overlap it.
+  A single cell varies by about 0.2 at 3 digits from the seed alone.
+- GSPO comes closest to a win: 3-digit mean gap +0.10 with the tightest seed range of any cell
+  (0.66-0.70), but baseline seed 0 (0.68) sits above three GSPO seeds. Its KL (0.019-0.020) is
+  below every GRPO `mu 4` seed. [INFERENCE] Its tiny clip range (3e-4 / 4e-4) may throttle the
+  four inner steps so it behaves more like `mu 1`; the clip fraction is not logged.
+- One tiny task, one base model, 200 steps. These are toy results and say nothing about how the
+  labs' recipes behave at their own scale. The recipe shapes follow the papers cited above; the
+  hyperparameters (eps_high of CISPO, `N = 50` of ProRL) are guesses where the paper gives none.
 
 ### KL isolation
 
-Four more runs change only `--beta`: GRPO `mu 4` with the KL term removed, and the three no-KL
-recipes with `--beta 0.04` restored. Same base, 200 steps, seeds 0 / 1, same verdict rule.
+Four more cells change only `--beta`: GRPO `mu 4` with the KL term removed, and the three no-KL
+recipes with `--beta 0.04` restored. Same base, 200 steps, seeds 0 to 3, same rule.
 
-| Run | 1-digit | 2-digit | 3-digit | KL | Verdict (3-digit) |
-|---|---|---|---|---|---|
-| GRPO `mu 4`, `--beta 0` | 1.00 / 0.96 | 0.68 / 0.64 | 0.44 / 0.52 | 0.052 / 0.034 | loses to GRPO `mu 4` with KL (0.68 / 0.60); 2-digit also loses (0.86 / 0.92) |
-| DAPO + KL | 1.00 / 1.00 | 0.92 / 0.92 | 0.82 / 0.62 | 0.028 / 0.028 | beats DAPO (0.50 / 0.52); no measurable difference to GRPO `mu 4` |
-| Magistral + KL | 1.00 / 1.00 | 0.88 / 0.90 | 0.60 / 0.38 | 0.035 / 0.028 | no measurable difference to Magistral (0.44 / 0.52); 1-digit recovers from 0.94 / 0.90 |
-| CISPO + KL | 0.82 / 0.86 | 0.60 / 0.54 | 0.36 / 0.42 | 0.042 / 0.047 | beats CISPO (0.34 / 0.10), seed 0 only by 0.02; still loses to GRPO `mu 4` |
+| Run | Mean 1 / 2 / 3 digits | 3-digit, seeds 0 / 1 / 2 / 3 | KL | Verdict |
+|---|---|---|---|---|
+| GRPO `mu 4`, `--beta 0` | 0.98 / 0.72 / 0.48 | 0.44 / 0.52 / 0.56 / 0.38 | 0.050 | no measurable difference to GRPO `mu 4` with KL |
+| DAPO + KL | 1.00 / 0.91 / 0.63 | 0.82 / 0.62 / 0.48 / 0.58 | 0.029 | no measurable difference to DAPO or to GRPO `mu 4` |
+| Magistral + KL | 0.99 / 0.83 / 0.55 | 0.60 / 0.38 / 0.56 / 0.66 | 0.029 | no measurable difference to Magistral or to GRPO `mu 4` |
+| CISPO + KL | 0.88 / 0.63 / 0.36 | 0.36 / 0.42 / 0.34 / 0.30 | 0.043 | no measurable difference to CISPO; loses to GRPO `mu 4` at 2 and 3 digits and to DAPO + KL in every column |
 
-- The KL term matters here: removing it from GRPO costs 0.16 at 3 digits and 0.23 at 2 digits,
-  and restoring it in DAPO closes DAPO's whole gap to GRPO.
-- It is not the whole story. CISPO with KL still loses to GRPO, and Magistral with KL is not
-  measurably better at 3 digits. Their other changes (unclipped-gradient weighting, batch-std
-  advantage, group-length normalisation) are not isolated one by one.
-- Two seeds, n = 50 per cell, one base model. DAPO + KL seed 0 (0.82) is the single highest
-  3-digit cell in this file; one cell is not evidence that DAPO + KL beats GRPO.
+- The KL term does what it is for: mean KL is higher without it in all four pairs and on every
+  seed (descriptive, computed after the runs, not part of the rule).
+- No accuracy effect of KL is measurable at 4 seeds. The point estimates move by 0.03-0.17 at 3
+  digits, inside the seed spread. The 2-seed version of this section read "removing KL costs
+  0.16 at 3 digits" and "restoring KL rescues DAPO"; neither survives seeds 2 and 3.
+- Closest calls: DAPO + KL vs DAPO at 2 digits has no overlap but a gap of 0.065; Magistral + KL
+  vs Magistral at 1 digit has a gap of 0.075 with one tie (0.94).
+- CISPO + KL still loses to DAPO + KL, so CISPO's collapse is not the missing KL term.
 
 ```bash
 minigpt grpo $B --mu 4 --beta 0 --out runs/kl_grpo_nokl/ckpt.pt
@@ -118,7 +114,38 @@ minigpt grpo $B --mu 4 --policy-loss cispo --loss-agg token-mean --clip-eps 1.0 
   --clip-eps-high 0.28 --beta 0.04 --fill-batch --out runs/kl_cispo_kl/ckpt.pt
 ```
 
-`$B` is defined in the Reproduce block below. Logs: `runs/logs/kl_*.log`.
+### Which part of CISPO and Magistral matters
+
+All cells keep `--beta 0.04`, so KL is on; same base, 200 steps, same rule.
+
+- `--clip-eps 1.0` sets the lower importance bound to 0, which can never fire. So CISPO + KL
+  differs from DAPO + KL in two ways: no lower clip and the CISPO gradient rule. A PPO control
+  (`--clip-eps 1.0 --clip-eps-high 0.28 --loss-agg token-mean --fill-batch`) splits them: it
+  differs from CISPO + KL only in `--policy-loss` and from DAPO + KL only in `--clip-eps`. PPO and
+  CISPO then differ only on tokens whose ratio exceeds 1.28.
+- Magistral's three changes (clip-higher, `--loss-agg group-mean`, `--advantage batch`) were
+  added one at a time to GRPO `mu 4` (4 seeds) and removed one at a time from Magistral + KL
+  (seeds 0 and 1 only).
+
+| Cell | Mean 1 / 2 / 3 digits | 3-digit, seeds 0 / 1 / 2 / 3 | Verdict (3-digit) |
+|---|---|---|---|
+| PPO control (no lower clip) | 0.92 / 0.75 / 0.47 | 0.54 / 0.48 / 0.40 / 0.46 | no measurable difference to DAPO + KL (gap -0.15) or to CISPO + KL (gap +0.12) |
+| GRPO `mu 4` + clip-higher | 0.98 / 0.86 / 0.56 | 0.56 / 0.50 / 0.60 / 0.56 | no measurable difference |
+| GRPO `mu 4` + group-mean | 0.98 / 0.84 / 0.57 | 0.56 / 0.52 / 0.62 / 0.58 | no measurable difference |
+| GRPO `mu 4` + batch advantage | 0.92 / 0.81 / 0.56 | 0.40 / 0.58 / 0.64 / 0.62 | no measurable difference |
+| Magistral + KL minus clip-higher / group-mean / batch advantage | — | seeds 0 / 1: 0.56 / 0.58; 0.66 / 0.44; 0.50 / 0.46 | no measurable difference |
+
+- CISPO: the two steps from DAPO + KL (0.63) to the PPO control (0.47) to CISPO + KL (0.36) are
+  each about 0.12-0.15 at 3 digits, and neither is measurable alone at 4 seeds; together they
+  are. [INFERENCE] Both the missing lower clip and the CISPO gradient rule likely contribute.
+- Magistral: none of its changes, alone or removed, has a measurable effect; nor does the full
+  bundle. GRPO + batch advantage at 2 digits (0.78-0.84 vs 0.86-0.92) has no overlap but a gap of
+  exactly 0.07, so it does not pass.
+- A rerun of GRPO `mu 4` seed 0 reproduced its log line for line, so cells from different
+  sessions are comparable and differences between cells come from flags and seeds.
+- Not measured: how often the clip fires (not logged); seeds 2 and 3 of the leave-one-out cells.
+
+`$B` is defined in the Reproduce block below. Logs: `runs/logs/kl_*.log`, `runs/logs/ri*_*.log`.
 
 Reproduce (from the repo root, base checkpoint in `runs/`):
 
@@ -136,5 +163,6 @@ minigpt grpo $B --advantage rloo --mu 1 --out runs/rl_rloo/ckpt.pt
 minigpt grpo $B --mu 4 --ref-reset-every 50 --out runs/rl_prorl/ckpt.pt
 ```
 
-Seed 1 runs add `--seed 1` (the later flag wins); the shared baseline is the plain `minigpt grpo
---base ...` run with seeds 0, 1, 2. Logs: `runs/logs/rl_*.log`, `runs/logs/grpo_mid_s*.log`.
+Seeds 1 to 3 add `--seed N` (the later flag wins); the shared baseline is the plain `minigpt grpo
+--base ...` run with seeds 0, 1, 2. Logs: `runs/logs/rl_*.log`, `runs/logs/grpo_mid_s*.log`,
+`runs/logs/ri4_*`, `runs/logs/ri5_*`, `runs/logs/ri6_*`.
