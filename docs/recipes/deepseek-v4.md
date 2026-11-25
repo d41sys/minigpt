@@ -12,7 +12,7 @@ results say which mechanisms still help at this size, not how V4 behaves at 1.6T
 | 2.1 DeepSeekMoE | routed experts (per-expert `nn.Linear`) plus shared experts, top-k routing on sqrt(softplus) affinities; aux-loss-free balancing: a per-expert bias (buffer, not trained) used only for selection, moved by `gamma * sign(load error)` each training step; small sequence-wise balance loss added to `loss` | `--n-experts 8 --n-shared-experts 1 --moe-top-k 2`, `--moe-bias-rate`, `--moe-balance-alpha` |
 | 2.1 Multi-token prediction | one extra sequential module predicts token t+2 from hidden state t and the embedding of t+1, shares embedding and head; its loss (weight `mtp_weight`) is added only in training, never in `logits` | `--mtp-depth 1` |
 | 2.2 mHC | 4 residual streams; the stream-mixing matrix is projected to doubly stochastic by Sinkhorn iterations | `--hc-streams 4` |
-| 2.3.1 Compressed sparse attention | KV compressed every m tokens; a lightning indexer scores compressed blocks and keeps the top-k; each query attends to those plus a causal local window of raw tokens. No KV cache: `generate` recomputes | `--attn-type csa` (`--csa-block`, `--csa-topk`, `--csa-window`) |
+| 2.3.1 Compressed sparse attention | KV compressed every m tokens; a lightning indexer scores compressed blocks and keeps the top-k; each query attends to those plus a causal local window of raw tokens. `generate` caches raw keys/values, finished compressed blocks and the unfinished block's inputs; past the context length it recomputes | `--attn-type csa` (`--csa-block`, `--csa-topk`, `--csa-window`) |
 | 2.4 Muon | Nesterov momentum 0.95, 8 + 2 hybrid Newton-Schulz steps, update RMS 0.18; on 2-D block weights only (experts included), AdamW on embeddings, head, router, `hc_` and 1-D params | `--optimizer muon` |
 
 Skipped: heavily compressed attention (HCA; it only pays at 1M-token context), FP4 quantization-
@@ -148,17 +148,42 @@ Reading:
   own yet all V4 still wins; the part-by-part ablation (all minus one) was not run.
 - Muon lowers test loss 3.5% at 1.7× dense's wall time. Its learning rate and AdamW's were not
   tuned, so this is the default-settings comparison only.
-- MoE's gain is at matched active parameters (5.08M vs 5.07M) but with 2.2× the total; dense
-  capacity matched on total parameters was not run, so "routing helps" and "more weights help" are
-  not separated. Aux-loss-free balancing keeps the worst layer within 1.17-1.33× of even.
+- MoE's gain is at matched active parameters (5.08M vs 5.07M) but with 2.2× the total; the
+  size-matched controls below separate the two. Aux-loss-free balancing keeps the worst layer
+  within 1.17-1.33× of even.
+
+### Size-matched dense controls
+
+Dense models widened with `--d-model` so their parameter count matches all V4's active (288:
+6.36M vs 6.53M) or total parameters (416: 13.03M vs 12.84M), each with AdamW and with Muon, so
+the optimizer is matched too. Same corpus, 4000 steps, `--final`, seeds 0 and 1, same rule.
+
+| Variant | Params | Test loss s0 / s1 | Val loss s0 / s1 | Train loss s0 / s1 | Wall s s0 / s1 |
+|---|---|---|---|---|---|
+| dense `--d-model 288` (AdamW) | 6.36M | 1.391 / 1.387 | 1.481 / 1.478 | 1.403 / 1.400 | 123 / 138 |
+| dense `--d-model 288`, Muon | 6.36M | 1.337 / 1.337 | 1.427 / 1.429 | 1.344 / 1.345 | 224 / 248 |
+| dense `--d-model 416` (AdamW) | 13.03M | 1.289 / 1.289 | 1.378 / 1.379 | 1.292 / 1.292 | 147 / 139 |
+| dense `--d-model 416`, Muon | 13.03M | 1.243 / 1.249 | 1.337 / 1.341 | 1.239 / 1.245 | 231 / 238 |
+| all V4 without Muon (from above) | 12.84M (6.53M) | 1.331 / 1.330 | 1.421 / 1.419 | 1.330 / 1.328 | 1287 / 1300 |
+| all V4 (from above) | 12.84M (6.53M) | 1.284 / 1.288 | 1.376 / 1.381 | 1.274 / 1.278 | 2069 / 2102 |
+
+- At matched active parameters V4 wins: all V4 without Muon beats dense 288 by 0.056 (1.330-1.331
+  vs 1.387-1.391), all V4 beats dense 288 + Muon by 0.049. Both pass the rule on test and val.
+- At matched total parameters V4 loses: dense 416 beats all V4 without Muon by 0.041, and dense
+  416 + Muon beats all V4 by 0.035 (1.243-1.249 vs 1.284-1.288). Both pass the rule on test and
+  val. Plain AdamW dense 416 (1.289) is level with all V4 with Muon (1.284-1.288).
+- So the 9.4% gain over the 5.07M dense model is mostly size. V4's parts buy loss per active
+  parameter, not per stored parameter. [INFERENCE] At this scale the practical case for the
+  architecture is cheaper compute per token, which this unfused implementation does not deliver:
+  all V4 took 9× the wall time of dense 416 + Muon.
 
 Limits of this table:
 
 - Two seeds change initialisation and batch order only (spreads up to 0.007); they do not cover
   corpus slice, learning rate or budget. One slice (first 50 MB), one budget (4000 steps, 1.75
   epochs). The budget was chosen from a single dense seed-0 curve.
-- "All V4" is not compute-matched (6.53M active vs 5.07M, 12.84M total) and there is no larger
-  dense control on this corpus, so size explains some unknown share of its −0.133.
+- Size is covered only by the two dense widths above, at one budget; FLOPs per token were not
+  measured.
 - Wall times come from a GPU shared with other jobs (it showed 98% utilisation from other users'
   processes before the first run); the two seeds agree within 3%, but compare ratios, not seconds.
   The toy MoE, mHC and CSA are unfused PyTorch loops: 13× dense for all V4.
@@ -257,27 +282,58 @@ settings in every row. Accuracy cells are rounded half up from 200 tasks.
 - Not done: a joint grid over both AdamW rates, AdamW weight decay or schedule, and any tuning
   of Muon. More than 3000 AdamW pretrain steps were not tried.
 
-GRPO, 200 steps from each seed-0 SFT checkpoint (one seed, so indicative only), 3-digit accuracy:
-dense 0.08 → 0.06, MoE 0.54 → 0.94, CSA 0.60 → 0.98. RL needs a base that already solves some
-tasks (zero-reward groups give no gradient); the dense seed-0 base was too weak.
+### GRPO on the V4 parts
+
+`grpo --steps 200 --seed S` from each seed's SFT checkpoint of the dense, MoE and CSA rows above
+(seeds 0-3), scored with `reason-eval --n 200` on the same tasks as the SFT table. 3-digit
+accuracy, SFT base → after GRPO:
+
+| Variant | s0 | s1 | s2 | s3 | Mean |
+|---|---|---|---|---|---|
+| dense | 0.080 → 0.125 | 0.305 → 0.705 | 0.460 → 0.950 | 0.705 → 0.925 | 0.39 → 0.68 |
+| + MoE | 0.545 → 0.945 | 0.270 → 0.720 | 0.595 → 0.930 | 0.540 → 0.910 | 0.49 → 0.88 |
+| + CSA | 0.645 → 0.990 | 0.385 → 0.915 | 0.505 → 0.955 | 0.855 → 0.955 | 0.60 → 0.95 |
+
+- GRPO raises 3-digit accuracy on all 12 runs. After it, the three ranges still overlap (dense
+  0.13-0.95, MoE 0.72-0.95, CSA 0.92-0.99), so no architecture difference is measurable after RL
+  either. CSA has the narrowest spread.
+- The seed-0 dense base (0.08) is the one run GRPO barely moves. An earlier version of this page
+  read that as "dense does not improve"; seeds 1-3 (bases 0.31-0.71) gain 0.22-0.49.
+  [INFERENCE] With a 3-digit base near 0, 3-digit groups all score 0 and give no gradient.
+- Within each architecture the weakest SFT seed is still the weakest after GRPO.
+- The earlier seed-0 numbers (0.08 → 0.06, 0.54 → 0.94, 0.60 → 0.98) came from `grpo`'s built-in
+  50-task eval, whose 2- and 3-digit tasks differ from the table's. That eval agrees in direction
+  on 11 of 12 runs; the exception is dense seed 0. Logs: `runs/logs/v4_grpo_*`, `v4_gre_*`.
 
 ### Do experts specialise by operator?
 
-`reason-pretrain --ops +,- --n-experts 8` (seed 0), then routing of 300 operand pairs written once
-with `+` and once with `-`. Total-variation distance between the expert shares, with a
-permutation null (labels swapped at random, 300 times):
+`reason-pretrain --ops +,- --n-experts 8` → `reason-sft --ops +,-` at seeds 0-3, then the routing
+of 300 operand pairs written once with `+` and once with `-` (the same pairs for every seed).
+Total-variation distance between the expert shares in the layer where it is largest (a maximum
+over 4 layers), against a permutation null (labels swapped at random, 300 times). Every value
+below is above its null 95th percentile (0.01-0.09), with p at the permutation floor 0.003.
 
-| Token | Pretrained, strongest layer | After SFT, strongest layer |
+| Token | Pretrained (equations), s0 / s1 / s2 / s3 | After SFT (traces), s0 / s1 / s2 / s3 |
 |---|---|---|
-| operator | TV 0.50, null p95 0.06 (expert 7 takes 50% of `+` and 0% of `-`) | TV 0.26, null p95 0.05 |
-| second operand | TV 0.74, null p95 0.09 | TV 0.18, null p95 0.03 |
-| answer / trace | TV 0.17, null p95 0.03 | TV 0.13, null p95 0.02 |
+| operator | 0.50 / 0.50 / 0.57 / 0.56 | 0.26 / 0.49 / 0.08 / 0.58 |
+| second operand | 0.74 / 0.37 / 0.43 / 0.43 | 0.18 / 0.21 / 0.39 / 0.73 |
+| `=` | 0.63 / 0.64 / 0.32 / 0.53 | 0.10 / 0.27 / 0.10 / 0.29 |
+| answer / trace | 0.17 / 0.37 / 0.31 / 0.44 | 0.13 / 0.08 / 0.08 / 0.06 |
 
-The operator token itself differs between the two inputs, so its routing split is trivial, at
-least in layer 0. The informative rows are the tokens that are the same in both inputs (second
-operand, answer and trace): their routing differs above the permutation null (p = 0.003) but
-after SFT only weakly (TV 0.13-0.18). The specialisation does not buy accuracy here: the
-mixed-operator MoE and dense models score 0.11 and 0.12 at 3 digits after SFT (seed 0).
+- The operator token differs between the inputs, so its split is trivial. The second operand
+  and `=` are the same tokens in both inputs; the answer and trace tokens are not (different
+  digits), so that row mixes operator with content.
+- Even on identical tokens the router reads a hidden state that has already attended to the
+  operator, so TV measures operator-dependent routing, not a split by token identity.
+- On identical tokens routing depends on the operator in every seed and both stages, by an
+  amount that varies a lot with the seed: after SFT, second operand 0.18-0.73 and `=` 0.10-0.29.
+  An earlier version of this page read seed 0 alone as "only weakly after SFT"; that holds for
+  seed 0 and for the answer / trace row (0.06-0.13), not for the second operand.
+  [INFERENCE] Part of the pretrained-to-SFT drop may come from scoring different text
+  (equations vs traces); not separated.
+- The specialisation does not buy accuracy. 3-digit accuracy after SFT (`reason-eval --n 200
+  --ops +,-`): MoE 0.105 / 0.235 / 0.180 / 0.050, dense 0.115 / 0.075 / 0.050 / 0.325, means 0.142
+  and 0.141; the ranges overlap. Logs: `runs/logs/v4_*_ab{moe,dense}_s*`, `v4_route_abmoe_*`.
 
 ## 3. Multi-teacher distillation (MOPD) on the V4 model
 
@@ -326,8 +382,12 @@ the wider range for KL), here with 2 seeds per row.
   for a student trained with Muon; not tested (no rate sweep, no `--optimizer muon` on `opd`,
   no longer run). "On-policy is weak on V4" holds for these settings only.
 - Cost: 5.8-6.5 h per run, about 29× dense E1 (726-785 s), on shared GPUs. The control costs the
-  same, so the student's rollouts dominate. [INFERENCE] The cause is that CSA has no KV cache;
-  this is implementation cost.
+  same, so the student's rollouts dominate: a profile put them at 96% of a train step. A CSA
+  decode cache sped generation up only 1.15-1.4×, and batching rollouts by prompt length gave
+  1.8-3.6× more train steps per second and about 5× faster greedy eval (`runs/logs/csacache_*`).
+  Dense E1 also generated one task at a time, so these recover only part of the 29×; the rest is
+  the higher cost of each V4 forward pass, not measured separately. The runs in this table
+  predate both changes.
 - Limits: one teacher pair and one student (seed 0), so the two seeds cover distillation noise
   only. The student is 2.7× the dense student and matched to it on 1-digit accuracy only. Each
   seed uses its own held-out tasks for KL. Logs: `runs/logs/v4m_*`.
@@ -337,12 +397,12 @@ the wider range for KL), here with 2 seeds per row.
 | Part | Small-scale verdict |
 |---|---|
 | Aux-loss-free balancing | works: even load, no loss cost |
-| MoE (matched active params) | TinyStories: test loss −0.071 (5.0%) on both seeds, at 2.2× the total parameters (no dense control of that size). Shakespeare: overfits faster. Equations: no measurable gain; weak operator-dependent routing on shared tokens |
+| MoE (matched active params) | TinyStories: test loss −0.071 (5.0%) on both seeds, at 2.2× the total parameters. Shakespeare: overfits faster. Equations: no measurable gain before or after GRPO (4 seeds); routing on identical tokens depends on the operator on all 4 seeds (TV 0.10-0.73 after SFT) without buying accuracy |
 | Multi-token prediction | TinyStories: test −0.006, at the edge of the rule, no difference on val. Shakespeare: no difference at 1000 steps; at 2000 steps it slows overfitting (test 3.76 vs 3.84, smallest gap). Equations: no measurable difference |
 | mHC | TinyStories: small gain, test −0.023 (1.6%) on both seeds. No measurable difference on Shakespeare or equations |
 | Compressed sparse attention | lower pretrain loss on equations; slightly worse on TinyStories (test +0.014); overfits Shakespeare faster; no speed gain at this context |
 | Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. Tuning AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61, so the accuracy gain is not a default-settings artefact; it needs Muon in both stages (one stage: 0.75-0.78). The val-loss gain over tuned AdamW is within AdamW's seed range. TinyStories: test −0.050 (3.5%) at default rates. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps) |
-| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. Best row on TinyStories (test −0.133, 9.4%; −0.089 without Muon), not size-matched there. Memorises Shakespeare |
+| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. TinyStories: beats dense models with as many parameters as its active ones (6.36M, by 0.05-0.06 test loss) but loses to dense models with as many as its total (13.03M, by 0.035-0.041), with the optimizer matched; 9× their wall time here. Memorises Shakespeare |
 | MOPD on all V4 | runs unchanged. On-policy lifts only 1-digit accuracy in 500 steps; off-policy is better on both seeds; V4 and dense teachers give the same result. 29× the dense wall time (no KV cache in CSA) |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
@@ -350,11 +410,11 @@ the dense model; that measures this implementation, not the architecture.
 
 ## Limits
 
-- 2 seeds for pretraining and MOPD, 4 for the reasoning pipeline, 1 for GRPO and routing.
+- 2 seeds for pretraining and MOPD, 4 for the reasoning pipeline, GRPO and routing.
 - Two corpora (Shakespeare, 414k training tokens, where overfitting dominates; a 50 MB TinyStories
   slice, 18.7M tokens, one step budget) and one toy task.
-- "All V4" is not compute-matched on either corpus (6.5M vs 5.1M active). On equations the larger
-  dense control (1.56M) covers size; the control has no language-model counterpart.
+- On TinyStories size is covered by two dense widths at one budget; FLOPs per token were not
+  measured. Shakespeare has no size-matched control.
 - AdamW was tuned one setting at a time (pretrain rate, SFT rate, steps) plus one combined row,
   not on a joint grid; Muon was not tuned at all.
 - Logs: `runs/logs/v4_*` (gitignored).
