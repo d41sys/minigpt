@@ -389,19 +389,58 @@ the wider range for KL), here with 2 seeds per row.
   (1 digit 0.68 / 0.68 vs 0.24-0.32; 2 digits 0.12-0.20 vs 0.02); `-` overlaps. The relative KL
   drop is similar (dense 38-47%, V4 34-38%); absolute KL is not comparable.
 - On-policy KL first rises (1.3 → 1.8-2.3 at step 100) in all four on-policy runs, then falls and
-  is still falling at step 500. [INFERENCE] `--lr 3e-4` with a fresh AdamW is too large a step
-  for a student trained with Muon; not tested (no rate sweep, no `--optimizer muon` on `opd`,
-  no longer run). "On-policy is weak on V4" holds for these settings only.
+  is still falling at step 500. The tuning runs below test the rate, the optimizer and the length.
 - Cost: 5.8-6.5 h per run, about 29× dense E1 (726-785 s), on shared GPUs. The control costs the
   same, so the student's rollouts dominate: a profile put them at 96% of a train step. A CSA
-  decode cache sped generation up only 1.15-1.4×, and batching rollouts by prompt length gave
+  decode cache sped generation up 1.15-1.4×, and batching rollouts by prompt length gave
   1.8-3.6× more train steps per second and about 5× faster greedy eval (`runs/logs/csacache_*`).
-  Dense E1 also generated one task at a time, so these recover only part of the 29×; the rest is
-  the higher cost of each V4 forward pass, not measured separately. The runs in this table
-  predate both changes.
-- Limits: one teacher pair and one student (seed 0), so the two seeds cover distillation noise
+  The runs in this table predate both changes; with them a 500-step run takes 1,890-2,220 s on a
+  lightly shared GPU, down from 21,000-23,500 s. Dense E1 was not rerun on the new code.
+
+### Tuning on-policy distillation
+
+Same recipe on the code with the cache and batched rollouts (`main` at `b33d2ea`). The student
+and the `+` teacher were rebuilt and match the originals bit for bit; the `-` teacher was rebuilt
+on the new code and is equivalent, not identical (1.00 / 1.00 / 0.99 on `-`, 0.09 on `+` at 1
+digit). Each variant changes one setting from the same-code baseline; seeds 0 and 1, rule fixed
+before the runs as above.
+
+| Run (500 steps unless noted) | Seed | `+` | `-` | KL start → end |
+|---|---|---|---|---|
+| baseline, AdamW `--lr 3e-4` | 0 | 0.390 / 0.010 / 0.000 | 0.565 / 0.080 / 0.000 | 1.315 → 0.761 |
+| baseline, AdamW `--lr 3e-4` | 1 | 0.190 / 0.010 / 0.000 | 0.605 / 0.015 / 0.000 | 1.332 → 0.913 |
+| `--lr 1e-4` | 0 | 0.635 / 0.100 / 0.010 | 0.950 / 0.285 / 0.030 | 1.315 → 0.534 |
+| `--lr 1e-4` | 1 | 0.705 / 0.125 / 0.005 | 0.915 / 0.220 / 0.010 | 1.332 → 0.516 |
+| `--optimizer muon` (`--lr 3e-4`) | 0 | 0.785 / 0.435 / 0.025 | 0.930 / 0.455 / 0.015 | 1.315 → 0.370 |
+| `--optimizer muon` (`--lr 3e-4`) | 1 | 0.755 / 0.530 / 0.045 | 0.965 / 0.475 / 0.040 | 1.332 → 0.326 |
+| `--steps 1000` | 0 | 0.765 / 0.350 / 0.005 | 0.910 / 0.240 / 0.000 | 1.315 → 0.478 |
+| `--steps 1000` | 1 | 0.505 / 0.015 / 0.000 | 0.905 / 0.060 / 0.005 | 1.332 → 0.609 |
+
+- Muon beats the baseline on both operators at 1 and 2 digits (2-digit gaps 0.375-0.425) and on
+  KL (0.33-0.37 vs 0.76-0.91). It also beats `--lr 1e-4` at 2 digits on both operators and on KL;
+  at 1 digit the `+` gap is exactly 0.05, so not measurable.
+- `--lr 1e-4` beats the baseline at 1 and 2 digits on both operators (2-digit gaps 0.09 and
+  0.14) and on KL.
+- 1000 steps beat the baseline at 1 digit only. 2-digit accuracy depends on the seed (`+` 0.350
+  vs 0.015), and the KL gap (0.1518) misses the wider range (0.1524).
+- 3 digits: every run stays at or below 0.045.
+- The baseline's KL rises at step 100 (to 1.41 and 1.55); with `--lr 1e-4` or Muon it does not.
+  [INFERENCE] The rise is AdamW at 3e-4 taking too large a first step on a Muon-trained student;
+  not isolated.
+- Against the old off-policy rows (older code, original `-` teacher; description only): Muon
+  on-policy is higher at 2 digits on both seeds (`+` 0.435-0.530 vs 0.235-0.305, `-` 0.455-0.475
+  vs 0.305-0.380) and has lower KL. "Off-policy beats on-policy on V4" held for the default
+  settings only; off-policy and the dense-teacher control were not rerun with Muon.
+- The step-500 row of each 1000-step run matches the 500-step baseline (KL 0.761 / 0.913), so a
+  run is deterministic for a given code version and seed. Logs: `runs/logs/opdt_*`.
+- Not done: Muon at any rate other than 3e-4, Muon for 1000 steps, more than one student and
+  teacher pair.
+
+### Limits of section 3
+
+- One teacher pair and one student (seed 0), so the two seeds cover distillation noise
   only. The student is 2.7× the dense student and matched to it on 1-digit accuracy only. Each
-  seed uses its own held-out tasks for KL. Logs: `runs/logs/v4m_*`.
+  seed uses its own held-out tasks for KL. Logs: `runs/logs/v4m_*`, `runs/logs/opdt_*`.
 
 ## Verdicts
 
@@ -414,7 +453,7 @@ the wider range for KL), here with 2 seeds per row.
 | Compressed sparse attention | lower pretrain loss on equations; slightly worse on TinyStories (test +0.014); overfits Shakespeare faster; no speed gain at this context |
 | Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. Tuning AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61, so the accuracy gain is not a default-settings artefact; it needs Muon in both stages (one stage: 0.75-0.78). The val-loss gain over tuned AdamW is within AdamW's seed range. TinyStories: test −0.050 (3.5%) at default rates. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps) |
 | All V4 together | lowest equation val loss (1.21), but a dense + Muon model of the same total size matches it (1.21) and the 1.56M one is not measurably worse; accuracy equal to Muon alone (0.95 vs 0.96). Under AdamW a larger dense control (1.56M) reaches only 0.45 and V4 without Muon 0.78. TinyStories: beats dense models with as many parameters as its active ones (6.36M, by 0.05-0.06 test loss) but loses to dense models with as many as its total (13.03M, by 0.035-0.041), with the optimizer matched; 9× their wall time here. Memorises Shakespeare |
-| MOPD on all V4 | runs unchanged. On-policy lifts only 1-digit accuracy in 500 steps; off-policy is better on both seeds; V4 and dense teachers give the same result. 29× the dense wall time (no KV cache in CSA) |
+| MOPD on all V4 | runs unchanged. At the default AdamW `--lr 3e-4`, on-policy lifts only 1-digit accuracy in 500 steps and off-policy is better. `--optimizer muon` on `opd` lifts 2-digit accuracy to 0.44-0.53 (from 0.01-0.08) and beats both the default and `--lr 1e-4`; 1000 steps at the default rate help only at 1 digit. 3 digits stay below 0.05 in every run. V4 and dense teachers give the same result. With the CSA cache and batched rollouts a run takes about 35 min instead of 6 h |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
 the dense model; that measures this implementation, not the architecture.
