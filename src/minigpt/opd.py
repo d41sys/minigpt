@@ -45,7 +45,7 @@ from minigpt.reason import (
     build_batch,
     per_token_log_probs,
     reasoning_tokenizer,
-    sample_group,
+    sample_batch,
     sample_task,
 )
 from minigpt.train import configure_optimizers, get_device
@@ -157,19 +157,33 @@ def _rollouts(
 ) -> tuple[torch.Tensor, torch.Tensor, list[list[int]], list[str]]:
     """`samplers[task.op]` completes each task `group` times.
 
+    Tasks that share a sampler model and a prompt length go through one `generate` call, so a
+    step costs a few batched decodes instead of one per task; rows keep the task order. The
+    greedy result matches the per-task path; sampled rollouts draw their random numbers in a
+    different order.
+
     Returns `(input_ids, labels, completions, row_ops)`; `row_ops[i]` is the op of row `i`.
     """
     tok = reasoning_tokenizer()
     pad_id = tok.special_to_id["<|pad|>"]
+    ids = [tok.encode(t.prompt) for t in tasks]
+    batches: dict[tuple[int, int], list[int]] = {}
+    for i, t in enumerate(tasks):
+        batches.setdefault((id(samplers[t.op]), len(ids[i])), []).append(i)
+    done: dict[int, list[list[int]]] = {}
+    for members in batches.values():
+        sampler = samplers[tasks[members[0]].op]
+        rows = sample_batch(
+            sampler, [ids[i] for i in members], group, max_new_tokens, tok.eos_token_id, temperature
+        )
+        for k, i in enumerate(members):
+            done[i] = rows[k * group : (k + 1) * group]
     prompts: list[list[int]] = []
     completions: list[list[int]] = []
     row_ops: list[str] = []
-    for t in tasks:
-        ids = tok.encode(t.prompt)
-        for c in sample_group(
-            samplers[t.op], ids, group, max_new_tokens, tok.eos_token_id, temperature
-        ):
-            prompts.append(ids)
+    for i, t in enumerate(tasks):
+        for c in done[i]:
+            prompts.append(ids[i])
             completions.append(c)
             row_ops.append(t.op)
     x, y = build_batch(prompts, completions, pad_id)
