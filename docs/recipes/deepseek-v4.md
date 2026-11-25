@@ -206,14 +206,21 @@ Limits of this table:
 | all V4 | 2.31M (1.26M) | 1.205 / 1.211 / 1.205 / 1.206 | 0.98 / 0.99 / 0.99 / 0.86 | 1.00 / 0.99 / 0.95 |
 | control: dense, `--d-model 176` | 1.56M | 1.684 / 1.730 / 1.672 / 1.640 | 0.49 / 0.56 / 0.62 / 0.12 | 0.87 / 0.65 / 0.45 |
 | control: all V4 without Muon (AdamW in pretrain and SFT) | 2.31M (1.26M) | 1.494 / 1.545 / 1.517 / 1.547 | 0.90 / 0.79 / 0.63 / 0.79 | 0.99 / 0.92 / 0.78 |
+| control: dense + Muon, `--d-model 176` | 1.56M | 1.232 / 1.245 / 1.225 / 1.235 | 0.99 / 0.95 / 0.87 / 0.94 | 1.00 / 1.00 / 0.94 |
+| control: dense + Muon, `--d-model 216` | 2.33M | 1.209 / 1.216 / 1.206 / 1.210 | 0.97 / 0.98 / 0.98 / 0.98 | 1.00 / 0.99 / 0.97 |
 
 Verdict rule for this table (4 seeds per row): a difference is measurable only when the two seed
 ranges do not overlap and the gap between the ranges is larger than 0.05 for accuracy (about one
 standard error of a difference at 200 tasks) or larger than the wider of the two ranges for val
 loss. Per-seed comparisons are given as description only.
 
-- Size does not explain the all-V4 result. A dense model larger than all V4's active parameters
-  (1.56M vs 1.26M) reaches 0.45 at 3 digits, about the same as the 0.84M dense (0.39).
+- With AdamW, size does not explain the all-V4 accuracy: a dense model larger than all V4's
+  active parameters (1.56M vs 1.26M) reaches 0.45 at 3 digits, about the same as the 0.84M dense
+  (0.39). With Muon in both, size does explain the all-V4 val loss: a dense model as large as all
+  V4's total (2.33M) matches it (ranges 1.206-1.216 vs 1.205-1.211, overlapping), and the 1.56M
+  dense + Muon is not measurably worse (1.225-1.245, gap 0.014, below the wider range 0.020).
+  Accuracy ranges overlap for both (0.87-0.99 and 0.97-0.98 vs 0.86-0.99). The earlier claim
+  "size does not explain it" rested on an AdamW-only control.
 - The V4 architecture without Muon beats that larger dense model on pretrain val loss: ranges
   1.49-1.55 vs 1.64-1.73, gap 0.09, just above the wider range (0.09). On 3-digit accuracy it is
   higher on every seed (mean 0.78 vs 0.45), but the ranges only just clear each other (0.63-0.90
@@ -224,7 +231,9 @@ loss. Per-seed comparisons are given as description only.
   vs 0.08-0.71, gap 0.16). Muon also removes the seed lottery: dense spans 0.63 at 3 digits,
   Muon 0.02.
 - Muon alone matches all V4 on accuracy (0.96 vs 0.95); accuracy is near its ceiling for both. On
-  val loss the two gains roughly add: Muon −0.27, architecture −0.20, both −0.52 (1.73 → 1.21).
+  val loss under Muon, the V4 architecture buys about what extra dense width does: Muon dense
+  0.84M 1.46, 2.33M 1.21, all V4 1.21. Under Muon, size is a measurable gain (0.84M vs 1.56M
+  ranges 1.44-1.49 vs 1.23-1.25, gap 0.20). Logs: `runs/logs/v4_r?_d*muon_s*`.
 - The AdamW settings in this table are the untuned defaults. The next section tunes AdamW in
   both stages; Muon in both stages still wins on accuracy.
 - MTP alone: no measurable difference (val loss and accuracy ranges overlap dense; 3-digit
@@ -402,7 +411,7 @@ the wider range for KL), here with 2 seeds per row.
 | mHC | TinyStories: small gain, test −0.023 (1.6%) on both seeds. No measurable difference on Shakespeare or equations |
 | Compressed sparse attention | lower pretrain loss on equations; slightly worse on TinyStories (test +0.014); overfits Shakespeare faster; no speed gain at this context |
 | Muon | the largest single gain on equations: alone it lowers val loss 1.73 → 1.46 and lifts 3-digit accuracy 0.39 → 0.96 on all 4 seeds, with a seed spread of 0.02 instead of 0.63. Tuning AdamW (pretrain rate, SFT rate, 2× steps) reaches at most 0.61, so the accuracy gain is not a default-settings artefact; it needs Muon in both stages (one stage: 0.75-0.78). The val-loss gain over tuned AdamW is within AdamW's seed range. TinyStories: test −0.050 (3.5%) at default rates. On Shakespeare it fits faster and overfits sooner (no held-out gain at 1000 steps) |
-| All V4 together | lowest equation val loss (1.21); accuracy equal to Muon alone (0.95 vs 0.96). A larger dense control (1.56M) reaches only 0.45, so size does not explain it; without Muon it reaches 0.78. TinyStories: beats dense models with as many parameters as its active ones (6.36M, by 0.05-0.06 test loss) but loses to dense models with as many as its total (13.03M, by 0.035-0.041), with the optimizer matched; 9× their wall time here. Memorises Shakespeare |
+| All V4 together | lowest equation val loss (1.21), but a dense + Muon model of the same total size matches it (1.21) and the 1.56M one is not measurably worse; accuracy equal to Muon alone (0.95 vs 0.96). Under AdamW a larger dense control (1.56M) reaches only 0.45 and V4 without Muon 0.78. TinyStories: beats dense models with as many parameters as its active ones (6.36M, by 0.05-0.06 test loss) but loses to dense models with as many as its total (13.03M, by 0.035-0.041), with the optimizer matched; 9× their wall time here. Memorises Shakespeare |
 | MOPD on all V4 | runs unchanged. On-policy lifts only 1-digit accuracy in 500 steps; off-policy is better on both seeds; V4 and dense teachers give the same result. 29× the dense wall time (no KV cache in CSA) |
 
 Cost: the toy MoE, mHC and CSA are plain PyTorch loops, not fused kernels, so wall time is 2-13×
