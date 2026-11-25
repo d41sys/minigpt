@@ -122,6 +122,27 @@ def effort_prefix(effort: int | None) -> str:
 
 
 @torch.no_grad()
+def sample_batch(
+    model: GPTModel,
+    prompts: list[list[int]],
+    n: int,
+    max_new_tokens: int,
+    eos_id: int,
+    temperature: float = 1.0,
+) -> list[list[int]]:
+    """Sample `n` completions of each prompt in one `generate` call (prompts of one length).
+
+    Row `i * n + j` is completion `j` of prompt `i`. Each is cut after its first EOS (kept).
+    """
+    device = next(model.parameters()).device
+    x = torch.tensor([p for p in prompts for _ in range(n)], dtype=torch.long, device=device)
+    out = model.generate(x, max_new_tokens, temperature=temperature, eos_token_id=eos_id)
+    completions: list[list[int]] = []
+    for row in out[:, len(prompts[0]) :].tolist():
+        completions.append(row[: row.index(eos_id) + 1] if eos_id in row else row)
+    return completions
+
+
 def sample_group(
     model: GPTModel,
     prompt_ids: list[int],
@@ -131,13 +152,7 @@ def sample_group(
     temperature: float = 1.0,
 ) -> list[list[int]]:
     """Sample `n` completions of one prompt. Each is cut after its first EOS (kept)."""
-    device = next(model.parameters()).device
-    x = torch.tensor([prompt_ids] * n, dtype=torch.long, device=device)
-    out = model.generate(x, max_new_tokens, temperature=temperature, eos_token_id=eos_id)
-    completions: list[list[int]] = []
-    for row in out[:, len(prompt_ids) :].tolist():
-        completions.append(row[: row.index(eos_id) + 1] if eos_id in row else row)
-    return completions
+    return sample_batch(model, [prompt_ids], n, max_new_tokens, eos_id, temperature)
 
 
 def build_batch(

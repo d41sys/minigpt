@@ -10,7 +10,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Per-layer key/value cache: {"k": (B, heads, T, head_dim), "v": same}; empty dict = nothing cached.
+# Per-layer decode cache; empty dict = nothing cached. Dense attention: {"k", "v"}, each
+# (B, heads, T, head_dim). Compressed sparse attention adds "comp" / "index" (B, finished blocks,
+# dim) and "pending" (B, < csa_block, d_model), the inputs of the unfinished block.
 LayerCache = dict[str, torch.Tensor]
 
 
@@ -203,8 +205,10 @@ class CompressedSparseAttention(CausalSelfAttention):
     and the index score is added to the selected entries' logits so the LM loss trains the
     indexer (the report trains it with a separate distillation loss).
 
-    At our ~100-256 token contexts this is about quality parity, not speed: the mask is dense.
-    It keeps no KV cache; `GPTModel.generate` falls back to full recompute for it.
+    Decoding is incremental: the layer cache holds the raw keys/values (only the newest `window`
+    are read), the compressed and indexer entries of every finished block, and the layer inputs of
+    the unfinished block. A new token appends itself; a block that completes is compressed once.
+    The same code runs without a cache (training, full forward) on an empty one that is dropped.
     """
 
     def __init__(self, config: GPTConfig) -> None:
@@ -217,37 +221,58 @@ class CompressedSparseAttention(CausalSelfAttention):
         self.index_q = nn.Linear(d, self.n_index_heads * self.index_dim, bias=False)
         self.index_w = nn.Linear(d, self.n_index_heads, bias=False)
 
-    def index_scores(self, x: torch.Tensor) -> torch.Tensor:
-        """Indexer score of every compressed entry for every query: (B, T, T // m)."""
+    def index_scores(self, x: torch.Tensor, entries: torch.Tensor) -> torch.Tensor:
+        """Indexer score of each compressed entry (B, N, c) for every query: (B, T, N)."""
         b, t, _ = x.size()
         q = self.index_q(x).view(b, t, self.n_index_heads, self.index_dim)
-        hits = F.relu(torch.einsum("bthc,bnc->bthn", q, self.index_comp(x)))
+        hits = F.relu(torch.einsum("bthc,bnc->bthn", q, entries))
         return torch.einsum("bth,bthn->btn", self.index_w(x), hits)
 
+    def _finish_blocks(self, x: torch.Tensor, cache: LayerCache) -> None:
+        """Compress the blocks that `x` (the new tokens) completes; park the rest as pending."""
+        x = torch.cat((cache["pending"], x), dim=1) if "pending" in cache else x
+        done = x.size(1) // self.m * self.m
+        cache["pending"] = x[:, done:]
+        if done:
+            for name, comp in (("comp", self.comp), ("index", self.index_comp)):
+                new = comp(x[:, :done])
+                cache[name] = torch.cat((cache[name], new), dim=1) if name in cache else new
+
     def forward(self, x: torch.Tensor, cache: LayerCache | None = None) -> torch.Tensor:
-        if cache is not None:
-            raise ValueError("CompressedSparseAttention has no KV cache; recompute instead")
+        cache = {} if cache is None else cache
         b, t, c = x.size()
         q, k, v = self.c_attn(x).chunk(3, dim=-1)
         q, k, v = (z.view(b, t, self.num_heads, self.head_dim).transpose(1, 2) for z in (q, k, v))
+        start = cache["k"].size(2) if cache else 0  # the new tokens sit at start .. start+t-1
         q_comp = q  # compressed entries carry no position, so score them with the unrotated q
         if self.rope:
             rope_cos: torch.Tensor = self.rope_cos  # type: ignore[assignment]
             rope_sin: torch.Tensor = self.rope_sin  # type: ignore[assignment]
-            cos, sin = rope_cos[:t], rope_sin[:t]
-            q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
+            cos, sin = rope_cos[start : start + t], rope_sin[start : start + t]
+            q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)  # k is cached rotated
+        if start:
+            k = torch.cat((cache["k"], k), dim=2)
+            v = torch.cat((cache["v"], v), dim=2)
+        cache["k"], cache["v"] = k, v
         scale = 1.0 / math.sqrt(self.head_dim)
 
-        pos = torch.arange(t, device=x.device)
-        near = (pos[:, None] >= pos[None, :]) & (pos[:, None] - pos[None, :] < self.window)
+        # Only the newest `window` raw keys matter: the first new query reads back to lo.
+        lo = max(0, start - self.window + 1)
+        k, v = k[:, :, lo:], v[:, :, lo:]
+        pos = torch.arange(start, start + t, device=x.device)
+        key_pos = torch.arange(lo, start + t, device=x.device)
+        near = (pos[:, None] >= key_pos[None, :]) & (pos[:, None] - key_pos[None, :] < self.window)
         scores = (q @ k.transpose(-2, -1) * scale).masked_fill(~near, float("-inf"))
 
-        n_comp = t // self.m
+        self._finish_blocks(x, cache)
+        n_comp = cache["comp"].size(1) if "comp" in cache else 0
         if n_comp:
-            comp = self.comp(x)  # (B, n_comp, head_dim), used as both key and value
+            comp = cache["comp"]  # (B, n_comp, head_dim), used as both key and value
             allowed = torch.arange(n_comp, device=x.device)[None, :] < (pos // self.m)[:, None]
-            index = self.index_scores(x).masked_fill(~allowed, float("-inf"))
-            top = index.topk(min(self.topk, n_comp), dim=-1).indices
+            index = self.index_scores(x, cache["index"]).masked_fill(~allowed, float("-inf"))
+            # Stable sort, not topk: the ReLU indexer ties at exactly 0 and topk's pick among
+            # ties depends on the tensor shape, so a cache (fewer entries) would pick other blocks.
+            top = index.argsort(dim=-1, descending=True, stable=True)[..., : min(self.topk, n_comp)]
             chosen = torch.zeros_like(index, dtype=torch.bool).scatter(-1, top, True) & allowed
             comp_scores = q_comp @ comp.transpose(-2, -1).unsqueeze(1) * scale
             comp_scores = comp_scores + index.masked_fill(~chosen, 0.0).unsqueeze(1)
@@ -255,9 +280,10 @@ class CompressedSparseAttention(CausalSelfAttention):
             scores = torch.cat((scores, comp_scores), dim=-1)
 
         weights = self.attn_dropout(F.softmax(scores, dim=-1))
-        out = weights[..., :t] @ v
+        n_raw = k.size(2)
+        out = weights[..., :n_raw] @ v
         if n_comp:
-            out = out + weights[..., t:] @ comp.unsqueeze(1)
+            out = out + weights[..., n_raw:] @ comp.unsqueeze(1)
         out = out.transpose(1, 2).contiguous().view(b, t, c)
         result: torch.Tensor = self.resid_dropout(self.c_proj(out))
         return result
@@ -591,14 +617,14 @@ class GPTModel(nn.Module):
         With `use_cache` (default) each layer keeps the keys and values of every token seen so
         far. The prompt is processed once; each later step feeds only the newest token and its
         single query attends over the cached keys, so a step costs O(T) instead of the O(T^2)
-        of re-running the whole prefix. Once the sequence outgrows `context_length` the window
-        slides, every token's position changes, and the cache is stale: those steps crop to the
-        last context_length tokens and recompute, exactly like `use_cache=False`. Compressed
-        sparse attention (`attn_type="csa"`) keeps no cache, so it always recomputes. MoE and
-        mHC act per token and cache fine; MTP is training-only and unused here.
+        of re-running the whole prefix. Compressed sparse attention also caches its finished
+        compressed/indexer blocks and the unfinished block's inputs, so it too extends the
+        prefix incrementally. Once the sequence outgrows `context_length` the window slides,
+        every token's position (and every CSA block boundary) changes, and the cache is stale:
+        those steps crop to the last context_length tokens and recompute, exactly like
+        `use_cache=False`. MoE and mHC act per token and cache fine; MTP is training-only.
         """
         self.eval()
-        use_cache = use_cache and self.config.attn_type == "dense"
         cache: list[LayerCache] = [{} for _ in self.blocks]
         for _ in range(max_new_tokens):
             if idx.size(1) > self.config.context_length:
