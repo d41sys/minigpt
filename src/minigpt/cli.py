@@ -84,6 +84,7 @@ from minigpt.reason import (
     Task,
     accuracy_reward,
     equation_corpus,
+    evaluate_pass_at_k,
     evaluate_reasoning,
     make_task,
     reasoning_tokenizer,
@@ -604,6 +605,7 @@ def cmd_opd(args: argparse.Namespace) -> None:
         estimator=args.estimator,
         r_max=args.r_max,
         optim=args.optim,
+        patience=args.patience,
     )
     for row in res["history"]:
         line = (
@@ -615,7 +617,8 @@ def cmd_opd(args: argparse.Namespace) -> None:
             line += " | " + " ".join(f"{k} {v:.3f}" for k, v in row.items() if "[" in k)
         print(line)
     out = Path(args.out or (OPD_OFF_POLICY_CKPT if args.off_policy else OPD_CKPT))
-    save_checkpoint(out, student, None, step=args.steps, val_loss=res["final_kl"])
+    save_checkpoint(out, student, None, step=res["steps_done"], val_loss=res["final_kl"])
+    print(f"steps trained: {res['steps_done']}")
     print(f"checkpoint -> {out}")
 
 
@@ -1129,6 +1132,12 @@ def cmd_reason_eval(args: argparse.Namespace) -> None:
     model = load_model(require(Path(args.checkpoint), "reason-sft")).to(device)
     tok = reasoning_tokenizer()
     print(report_reasoning(model, tok, args.n, args.seed, args.efforts, args.ops))
+    if args.pass_k:
+        seed_everything(args.seed)
+        for d, p in evaluate_pass_at_k(
+            model, tok, args.n, args.pass_k, args.seed, ops=args.ops
+        ).items():
+            print(f"{d} digits: pass@{args.pass_k} {p:.3f}")
 
 
 def parse_floats(s: str) -> tuple[float, ...]:
@@ -1611,6 +1620,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--r-max", type=float, default=5.0, help="--estimator token: reward clip")
     s.add_argument("--out", default=None, help=f"default {OPD_CKPT} ({OPD_OFF_POLICY_CKPT} off)")
+    s.add_argument(
+        "--patience",
+        type=int,
+        default=0,
+        help="stop after this many consecutive evals without a new best greedy accuracy (0 = off)",
+    )
     add_optim_arg(s)
     s.set_defaults(func=cmd_opd)
 
@@ -1751,6 +1766,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_ops_arg(s)
     s.add_argument("--n", type=int, default=50, help="tasks per digit count")
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--pass-k", type=int, default=0, help="also print pass@k (1-3 digits, k samples at T=1)"
+    )
     s.add_argument("--efforts", type=parse_efforts, default=(), help="comma list, e.g. 1,9")
     s.set_defaults(func=cmd_reason_eval)
 

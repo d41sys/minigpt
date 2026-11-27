@@ -242,6 +242,7 @@ def train_opd(
     estimator: Estimator = "full",
     optim: str = "adamw",
     r_max: float = 5.0,
+    patience: int = 0,
 ) -> dict[str, Any]:
     """Distil `teachers` into `student` on prompts of 1..`digits` digits, one op drawn from `ops`.
 
@@ -254,7 +255,9 @@ def train_opd(
     `temperature` (0 = greedy) and the student minimises cross-entropy on them; `kl` is then
     unused for training. Every `eval_every` steps (and at step 0) both modes are scored the same
     way, on a fixed seeded task set with greedy student rollouts, so their reverse-KL curves are
-    comparable.
+    comparable. `patience` > 0 stops early once that many consecutive evals fail to beat the best
+    greedy accuracy so far (the step-0 eval counts as the first best); `steps_done` is the step
+    reached.
     """
     if isinstance(teachers, GPTModel):
         teachers = {op: teachers for op in ops}
@@ -284,11 +287,17 @@ def train_opd(
 
     history: list[dict[str, float]] = []
     run_loss, run_n = 0.0, 0
+    best, stale, steps_done = -1.0, 0, steps
     for step in range(steps + 1):
         if step % eval_every == 0 or step == steps:
             row = evaluate_student(student, routes, held_out, max_new_tokens, device)
             history.append({"step": float(step), "loss": run_loss / max(1, run_n), **row})
             run_loss, run_n = 0.0, 0
+            stale = 0 if row["accuracy"] > best else stale + 1
+            best = max(best, row["accuracy"])
+            if patience and stale >= patience:
+                steps_done = step
+                break
         if step == steps:
             break
 
@@ -306,4 +315,9 @@ def train_opd(
         run_loss += loss.item()
         run_n += 1
 
-    return {"history": history, "first_kl": history[0]["kl"], "final_kl": history[-1]["kl"]}
+    return {
+        "history": history,
+        "first_kl": history[0]["kl"],
+        "final_kl": history[-1]["kl"],
+        "steps_done": steps_done,
+    }
