@@ -169,6 +169,29 @@ Gap = lowest seed of the first arm minus highest seed of the second; a gap above
 - OPD uses the full-vocabulary reverse KL at lr 3e-4, the repo defaults; no tuning.
 - Not tested: other switch rules or budgets, a mixed teacher set during RL, larger students.
 
+## Round 2: OPD with Muon (predeclared before running)
+
+Round 1 distilled at the untuned default (AdamW 3e-4) and its switch rule stopped OPD after 100
+to 200 steps, so C and E were mostly GRPO. Two other experiments found `opd --optimizer muon`
+(lr 3e-4) clearly better than the default ([deepseek-v4.md](deepseek-v4.md) section 3, the tuned
+OPD in [merging.md](merging.md)). Round 2 repeats the comparison with it. Nothing else changes:
+same student, teachers, 600-step budget, scoring (M, pass@8, n = 200), seeds 0-3, final-step
+models, same `opd` evals every 50 steps on 200 held-out tasks (logging only, no early stop).
+
+| arm | recipe |
+|---|---|
+| A' | `grpo --ops +,-` 600 steps from the student (round 1's A numbers are reused only if this code reproduces A seed 0 cell for cell; otherwise A' is rerun on all 4 seeds) |
+| B' | `opd --optimizer muon` (reverse KL, RL teachers) 600 steps |
+| C' | `opd --optimizer muon` RL teachers 300 fixed steps, then `grpo` 300 steps |
+| E' | as C' with the raw (SFT) teachers |
+
+`grpo` after the OPD phase keeps its default optimizer (AdamW); only `opd` uses Muon. Same verdict
+rule as round 1: X beats Y only if the 4 seed values of M do not overlap **and** the gap
+(lowest X minus highest Y) exceeds 0.05; otherwise "no measurable difference"; the same rule is
+applied to mean pass@8. Claim 1' = C' beats A' and B'; claim 2' = C' beats E'. Check: B' vs round
+1's B (Muon against default optimizer, same rule). Nothing is changed after seeing results
+except what is labelled post-hoc.
+
 ## Reproduce
 
 Logs: `runs/logs/og_*.log` (training), `og_eval_*_op{+,-}.log` (`reason-eval`), `.time` wall
