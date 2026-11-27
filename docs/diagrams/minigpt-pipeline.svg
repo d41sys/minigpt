@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 960 316" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-pipeline-title minigpt-pipeline-desc" id="minigpt-pipeline-root">
 <title id="minigpt-pipeline-title">minigpt chat pipeline</title>
-<desc id="minigpt-pipeline-desc">Pretraining on tiny-Shakespeare feeds the spam classifier and SFT on 900 Alpaca rows; the SFT model samples 300 rejected answers for DPO and also starts Constitutional AI (judge critique and revision, then DPO on judge preference labels); eval scores SFT and DPO.</desc>
+<desc id="minigpt-pipeline-desc">Pretraining on tiny-Shakespeare or a TinyStories slice (dense or toy DeepSeek-V4, AdamW or Muon) feeds the spam classifier, continued pretraining on a new domain with replay of the old corpus, and SFT on 900 Alpaca rows; the SFT model samples 300 rejected answers for DPO and also starts Constitutional AI (judge critique and revision, then DPO on judge preference labels); eval scores SFT and DPO.</desc>
 <defs>
 <style>
 #minigpt-pipeline-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
@@ -26,6 +26,7 @@
 <path class="a" d="M 768,76 L 800,76"/>
 <path class="a" d="M 252,104 L 252,168"/>
 <path class="a" d="M 424,104 V 136 Q 424,144 432,144 H 852 Q 860,144 860,136 V 104"/>
+<path class="a" d="M 222,104 V 136 Q 222,144 214,144 H 108 Q 100,144 100,152 V 168"/>
 <path class="a" d="M 384,104 L 384,168"/>
 <path class="aa" d="M 464,196 L 496,196"/>
 <rect class="mask" x="602" y="126" width="60" height="12" rx="2"/>
@@ -33,10 +34,10 @@
 <rect class="mask" x="40" y="48" width="120" height="56" rx="6"/>
 <rect class="data" x="40" y="48" width="120" height="56" rx="6"/>
 <text class="n" x="100" y="74">Shakespeare</text>
-<text class="s" x="100" y="90">tiny, 1.1 MB</text>
+<text class="s" x="100" y="90">or TinyStories 50 MB</text>
 <rect class="stage" x="192" y="48" width="120" height="56" rx="6"/>
 <text class="n" x="252" y="74">pretrain</text>
-<text class="s" x="252" y="90">5M params</text>
+<text class="s" x="252" y="90">dense or V4, Muon</text>
 <rect class="stage" x="344" y="48" width="120" height="56" rx="6"/>
 <text class="n" x="404" y="74">SFT</text>
 <text class="s" x="404" y="90">Alpaca, 900 rows</text>
@@ -50,6 +51,9 @@
 <rect class="stage" x="800" y="48" width="120" height="56" rx="6"/>
 <text class="n" x="860" y="74">eval</text>
 <text class="s" x="860" y="90">ppl·EM·F1·judge</text>
+<rect class="stage" x="40" y="168" width="120" height="56" rx="6"/>
+<text class="n" x="100" y="194">CPT + replay</text>
+<text class="s" x="100" y="210">old corpus mixed in</text>
 <rect class="stage" x="192" y="168" width="120" height="56" rx="6"/>
 <text class="n" x="252" y="194">spam classifier</text>
 <text class="s" x="252" y="210">SMS Spam</text>
