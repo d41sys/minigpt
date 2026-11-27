@@ -82,6 +82,15 @@ from minigpt.model import GPTConfig, GPTModel, MoEFeedForward, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
 from minigpt.pretrain_compare import compare, format_report, load_records
+from minigpt.prm import (
+    best_of_n,
+    build_example,
+    cached_samples,
+    draw_eval_tasks,
+    prm_shaped_reward,
+    score_samples,
+    train_verifier,
+)
 from minigpt.reason import (
     OPS,
     Task,
@@ -1337,7 +1346,11 @@ def run_grpo(
 
 
 def cmd_grpo(args: argparse.Namespace) -> None:
-    run_grpo(args, default_reward, None)
+    reward_fn: RewardFn = default_reward
+    if args.prm:
+        prm = load_reward_model(require(Path(args.prm), "prm")).to(get_device()).eval()
+        reward_fn = prm_shaped_reward(default_reward, prm, reasoning_tokenizer(), args.prm_weight)
+    run_grpo(args, reward_fn, None)
 
 
 def cmd_hack_demo(args: argparse.Namespace) -> None:
@@ -1553,6 +1566,75 @@ def cmd_reason_dpo(args: argparse.Namespace) -> None:
     print("greedy on fixed tasks:")
     print(report_reasoning(policy, tok, args.eval_n, 0, (), args.ops))
     print(f"checkpoint -> {args.out}")
+
+
+def cmd_prm(args: argparse.Namespace) -> None:
+    """Sample the policy once (cached), then train a PRM and an ORM on the same samples."""
+    device = get_device()
+    tok = reasoning_tokenizer()
+    sft_path = require(Path(args.sft), "reason-sft")
+    policy = load_model(sft_path).to(device)
+    check_rollout_fits(policy, args.max_digits, args.max_new_tokens)
+    out = Path(args.out)
+    seed_everything(args.data_seed)
+    tasks = draw_tasks(args, random.Random(args.data_seed))
+    samples = cached_samples(
+        Path(args.samples or out / "samples.json"),
+        policy,
+        tok,
+        tasks,
+        args.k,
+        args.max_new_tokens,
+        args.temperature,
+    )
+    examples = [build_example(tok, s, j) for s in samples for j in range(len(s.ids))]
+    n_steps = [len(e.labels) for e in examples]
+    print(
+        f"device={device} {len(examples)} samples, accuracy "
+        f"{sum(e.outcome for e in examples) / len(examples):.3f}, "
+        f"{sum(1 for n in n_steps if n)} with step labels, "
+        f"{sum(y for e in examples for y in e.labels)}/{sum(n_steps)} steps labeled right"
+    )
+    for kind in ("prm", "orm"):
+        seed_everything(args.seed)
+        rm = new_reward_model(load_model(sft_path), tok.special_to_id["<|pad|>"])
+        res = train_verifier(
+            rm, examples, kind, args.epochs, args.batch_size, args.lr, device=device, seed=args.seed
+        )
+        for row in res["history"]:
+            print(
+                f"{kind} epoch {int(row['epoch'])} bce {row['loss']:.4f} acc {row['accuracy']:.3f} "
+                f"held-out bce {row['val_loss']:.4f} acc {row['val_accuracy']:.3f}"
+            )
+        save_reward_model(out / f"{kind}.pt", rm, args.epochs, res["val_loss"], res["val_accuracy"])
+        print(f"checkpoint -> {out / f'{kind}.pt'}")
+
+
+def cmd_best_of_n(args: argparse.Namespace) -> None:
+    """Sample N per held-out task from a fixed policy; report what each selector picks."""
+    ns = [int(x) for x in args.ns.split(",")]
+    device = get_device()
+    tok = reasoning_tokenizer()
+    policy = load_model(require(Path(args.policy), "reason-sft")).to(device)
+    check_rollout_fits(policy, args.max_digits, args.max_new_tokens)
+    seed_everything(args.seed)
+    tasks = draw_eval_tasks(random.Random(args.seed), args.n_per_digit, args.max_digits)
+    samples = cached_samples(
+        Path(args.samples), policy, tok, tasks, max(ns), args.max_new_tokens, args.temperature
+    )
+    prm = load_reward_model(require(Path(args.prm), "prm")).to(device)
+    orm = load_reward_model(require(Path(args.orm), "prm")).to(device)
+    result = best_of_n(samples, score_samples(prm, orm, tok, samples, device), ns)
+    for n in ns:
+        print(f"N={n}: accuracy of the selected answer per digit count, then the mean")
+        for name, by_n in result.items():
+            cells = by_n[n]
+            row = " ".join(f"{d}d {a:.3f}" for d, a in cells.items())
+            print(f"  {name:9s} {row} mean {sum(cells.values()) / len(cells):.3f}")
+    if args.json_out:
+        Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json_out).write_text(json.dumps(result))
+        print(f"results -> {args.json_out}")
 
 
 def cmd_merge(args: argparse.Namespace) -> None:
@@ -1907,6 +1989,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("grpo", help="GRPO on verifiable addition from the reasoning SFT model")
     add_grpo_args(s, GRPO_CKPT)
+    s.add_argument("--prm", default=None, help="add --prm-weight x P(every step right) to reward")
+    s.add_argument("--prm-weight", type=float, default=1.0)
     s.set_defaults(func=cmd_grpo)
 
     s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")
@@ -1969,6 +2053,38 @@ def build_parser() -> argparse.ArgumentParser:
     add_ops_arg(s)
     s.add_argument("--out", required=True)
     s.set_defaults(func=cmd_reason_dpo)
+
+    s = sub.add_parser("prm", help="train a process and an outcome reward model on own samples")
+    s.add_argument("--sft", default=str(REASON_SFT_CKPT), help="policy that writes the samples")
+    s.add_argument("--tasks", type=int, default=3000, help="tasks sampled")
+    s.add_argument("--k", type=int, default=4, help="completions per task")
+    s.add_argument("--min-digits", type=int, default=1)
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--epochs", type=int, default=3)
+    s.add_argument("--batch-size", type=int, default=32)
+    s.add_argument("--lr", type=float, default=1e-4)
+    s.add_argument("--seed", type=int, default=0, help="head init and batch order")
+    s.add_argument("--data-seed", type=int, default=1234, help="task draw and sampling")
+    s.add_argument("--samples", default=None, help="sample cache; default <out>/samples.json")
+    add_ops_arg(s)
+    s.add_argument("--out", default="runs/prm", help="directory for prm.pt and orm.pt")
+    s.set_defaults(func=cmd_prm)
+
+    s = sub.add_parser("best-of-n", help="select among N samples: random, vote, ORM, PRM")
+    s.add_argument("--policy", default=str(REASON_SFT_CKPT))
+    s.add_argument("--prm", default="runs/prm/prm.pt")
+    s.add_argument("--orm", default="runs/prm/orm.pt")
+    s.add_argument("--ns", default="1,4,16", help="comma list; samples max(ns) per task")
+    s.add_argument("--n-per-digit", type=int, default=200, help="held-out tasks per digit count")
+    s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--max-new-tokens", type=int, default=80)
+    s.add_argument("--temperature", type=float, default=1.0)
+    s.add_argument("--seed", type=int, default=7, help="held-out tasks and their samples")
+    s.add_argument("--samples", default="runs/prm/eval_samples.json", help="sample cache")
+    s.add_argument("--json-out", default=None)
+    s.set_defaults(func=cmd_best_of_n)
 
     s = sub.add_parser("merge", help="task arithmetic: base + L * sum(expert - base)")
     s.add_argument("--base", required=True, help="checkpoint the experts were fine-tuned from")
