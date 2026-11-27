@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 440" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-labs-title minigpt-labs-desc" id="minigpt-labs-root">
+<title id="minigpt-labs-title">minigpt against the published pipelines of DeepSeek, Anthropic and OpenAI</title>
+<desc id="minigpt-labs-desc">Three swimlanes, one per lab, with stages from pretraining through mid-training and SFT, preference learning and RL, to distillation, safety and checks. Boxes minigpt reproduces at toy scale are filled blue, partial ones have a blue outline, in-progress ones a dashed blue outline, and stages minigpt does not reproduce are plain.</desc>
+<defs>
+<style>
+#minigpt-labs-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
+#minigpt-labs-root .ln { fill: #1f2328; font-size: 14px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+#minigpt-labs-root .s { fill: #59636e; font-size: 9px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; }
+#minigpt-labs-root .sl { fill: #59636e; font-size: 9px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; }
+#minigpt-labs-root .lbl { fill: #59636e; font-size: 8px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; text-anchor: middle; letter-spacing: 0.06em; }
+#minigpt-labs-root .leg { fill: #59636e; font-size: 9px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+#minigpt-labs-root .mask { fill: #ffffff; }
+#minigpt-labs-root .stage { fill: #ffffff; stroke: #1f2328; stroke-width: 1; }
+#minigpt-labs-root .data { fill: #1f2328; fill-opacity: 0.05; stroke: #59636e; stroke-width: 1; }
+#minigpt-labs-root .acc { fill: #0969da; fill-opacity: 0.08; stroke: #0969da; stroke-width: 1; }
+#minigpt-labs-root .part { fill: #ffffff; stroke: #0969da; stroke-width: 1; }
+#minigpt-labs-root .wip { fill: #ffffff; stroke: #0969da; stroke-width: 1; stroke-dasharray: 4 3; }
+#minigpt-labs-root .a { fill: none; stroke: #59636e; stroke-width: 1.2; marker-end: url(#minigpt-labs-arrow); }
+</style>
+<marker id="minigpt-labs-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#59636e"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text class="lbl" x="239" y="34">PRETRAIN</text>
+<text class="lbl" x="431" y="34">MID-TRAIN / SFT</text>
+<text class="lbl" x="623" y="34">PREFERENCE / RL</text>
+<text class="lbl" x="815" y="34">DISTILL / SAFETY / CHECK</text>
+<rect class="data" x="40" y="46" width="880" height="108" rx="6"/>
+<text class="ln" x="52" y="90">DeepSeek</text>
+<text class="sl" x="52" y="106">V3 to V4.1</text>
+<text class="sl" x="52" y="118">R1, V3.2, V4</text>
+<rect class="mask" x="150" y="54" width="178" height="44" rx="6"/>
+<rect class="part" x="150" y="54" width="178" height="44" rx="6"/>
+<text class="n" x="239" y="73">V3/V4 pretrain</text>
+<text class="s" x="239" y="88">MoE MTP mHC CSA Muon</text>
+<rect class="stage" x="150" y="102" width="178" height="44" rx="6"/>
+<text class="n" x="239" y="121">MLA, FP8, HCA, FP4</text>
+<text class="s" x="239" y="136">not reproduced</text>
+<path class="a" d="M 329,100 L 341,100"/>
+<rect class="mask" x="342" y="54" width="178" height="44" rx="6"/>
+<rect class="acc" x="342" y="54" width="178" height="44" rx="6"/>
+<text class="n" x="431" y="73">Cold-start SFT</text>
+<text class="s" x="431" y="88">reason-sft</text>
+<rect class="mask" x="342" y="102" width="178" height="44" rx="6"/>
+<rect class="acc" x="342" y="102" width="178" height="44" rx="6"/>
+<text class="n" x="431" y="121">Rejection-sampling SFT</text>
+<text class="s" x="431" y="136">reason-rft</text>
+<path class="a" d="M 521,100 L 533,100"/>
+<rect class="mask" x="534" y="54" width="178" height="44" rx="6"/>
+<rect class="acc" x="534" y="54" width="178" height="44" rx="6"/>
+<text class="n" x="623" y="73">GRPO, rule rewards</text>
+<text class="s" x="623" y="88">grpo</text>
+<rect class="stage" x="534" y="102" width="178" height="44" rx="6"/>
+<text class="n" x="623" y="121">GRM rubric rewards</text>
+<text class="s" x="623" y="136">not reproduced</text>
+<path class="a" d="M 713,100 L 725,100"/>
+<rect class="mask" x="726" y="54" width="178" height="44" rx="6"/>
+<rect class="acc" x="726" y="54" width="178" height="44" rx="6"/>
+<text class="n" x="815" y="73">Multi-teacher OPD</text>
+<text class="s" x="815" y="88">opd --teacher</text>
+<rect class="stage" x="726" y="102" width="178" height="44" rx="6"/>
+<text class="n" x="815" y="121">Safety reward model</text>
+<text class="s" x="815" y="136">not reproduced</text>
+<rect class="data" x="40" y="162" width="880" height="108" rx="6"/>
+<text class="ln" x="52" y="206">Anthropic</text>
+<text class="sl" x="52" y="222">CAI 2022</text>
+<text class="sl" x="52" y="234">to Opus 5.5</text>
+<rect class="mask" x="150" y="194" width="178" height="44" rx="6"/>
+<rect class="part" x="150" y="194" width="178" height="44" rx="6"/>
+<text class="n" x="239" y="213">Pretrain, undisclosed</text>
+<text class="s" x="239" y="228">pretrain (generic)</text>
+<path class="a" d="M 329,216 L 341,216"/>
+<rect class="mask" x="342" y="170" width="178" height="44" rx="6"/>
+<rect class="acc" x="342" y="170" width="178" height="44" rx="6"/>
+<text class="n" x="431" y="189">SL-CAI critique + revise</text>
+<text class="s" x="431" y="204">cai-data --stage sl</text>
+<rect class="mask" x="342" y="218" width="178" height="44" rx="6"/>
+<rect class="part" x="342" y="218" width="178" height="44" rx="6"/>
+<text class="n" x="431" y="237">Character training</text>
+<text class="s" x="431" y="252">cai-* with a trait file</text>
+<path class="a" d="M 521,216 L 533,216"/>
+<rect class="mask" x="534" y="170" width="178" height="44" rx="6"/>
+<rect class="acc" x="534" y="170" width="178" height="44" rx="6"/>
+<text class="n" x="623" y="189">Preference model + PPO</text>
+<text class="s" x="623" y="204">reward-model, ppo</text>
+<rect class="mask" x="534" y="218" width="178" height="44" rx="6"/>
+<rect class="acc" x="534" y="218" width="178" height="44" rx="6"/>
+<text class="n" x="623" y="237">RL-CAI (RLAIF)</text>
+<text class="s" x="623" y="252">cai-data --stage rl</text>
+<path class="a" d="M 713,216 L 725,216"/>
+<rect class="mask" x="726" y="170" width="178" height="44" rx="6"/>
+<rect class="wip" x="726" y="170" width="178" height="44" rx="6"/>
+<text class="n" x="815" y="189">Constitutional classifiers</text>
+<text class="s" x="815" y="204">in progress, see recipe</text>
+<rect class="mask" x="726" y="218" width="178" height="44" rx="6"/>
+<rect class="part" x="726" y="218" width="178" height="44" rx="6"/>
+<text class="n" x="815" y="237">Reward-hack screening</text>
+<text class="s" x="815" y="252">hack-demo</text>
+<rect class="data" x="40" y="278" width="880" height="108" rx="6"/>
+<text class="ln" x="52" y="322">OpenAI</text>
+<text class="sl" x="52" y="338">InstructGPT</text>
+<text class="sl" x="52" y="350">to GPT-6</text>
+<rect class="mask" x="150" y="310" width="178" height="44" rx="6"/>
+<rect class="part" x="150" y="310" width="178" height="44" rx="6"/>
+<text class="n" x="239" y="329">Pretrain (gpt-oss: MoE)</text>
+<text class="s" x="239" y="344">pretrain --n-experts</text>
+<path class="a" d="M 329,332 L 341,332"/>
+<rect class="mask" x="342" y="286" width="178" height="44" rx="6"/>
+<rect class="acc" x="342" y="286" width="178" height="44" rx="6"/>
+<text class="n" x="431" y="305">SFT on demonstrations</text>
+<text class="s" x="431" y="320">sft</text>
+<rect class="stage" x="342" y="334" width="178" height="44" rx="6"/>
+<text class="n" x="431" y="353">Deliberative alignment</text>
+<text class="s" x="431" y="368">not reproduced</text>
+<path class="a" d="M 521,332 L 533,332"/>
+<rect class="mask" x="534" y="286" width="178" height="44" rx="6"/>
+<rect class="acc" x="534" y="286" width="178" height="44" rx="6"/>
+<text class="n" x="623" y="305">Reward model + PPO</text>
+<text class="s" x="623" y="320">reward-model, ppo</text>
+<rect class="mask" x="534" y="334" width="178" height="44" rx="6"/>
+<rect class="acc" x="534" y="334" width="178" height="44" rx="6"/>
+<text class="n" x="623" y="353">o-series CoT RL</text>
+<text class="s" x="623" y="368">grpo, grpo --efforts</text>
+<path class="a" d="M 713,332 L 725,332"/>
+<rect class="mask" x="726" y="286" width="178" height="44" rx="6"/>
+<rect class="wip" x="726" y="286" width="178" height="44" rx="6"/>
+<text class="n" x="815" y="305">Process reward model</text>
+<text class="s" x="815" y="320">in progress, prm</text>
+<rect class="mask" x="726" y="334" width="178" height="44" rx="6"/>
+<rect class="acc" x="726" y="334" width="178" height="44" rx="6"/>
+<text class="n" x="815" y="353">CoT monitor</text>
+<text class="s" x="815" y="368">hack-demo</text>
+
+<line x1="40" y1="404" x2="920" y2="404" stroke="#1f2328" stroke-width="0.8" stroke-opacity="0.10"/>
+<text x="40" y="424" fill="#59636e" font-size="8" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">LEGEND</text>
+<rect class="acc" x="120" y="416" width="24" height="12" rx="2"/>
+<text class="leg" x="152" y="425">minigpt reproduces it</text>
+<rect class="part" x="320" y="416" width="24" height="12" rx="2"/>
+<text class="leg" x="352" y="425">partial</text>
+<rect class="wip" x="460" y="416" width="24" height="12" rx="2"/>
+<text class="leg" x="492" y="425">in progress</text>
+<rect class="stage" x="620" y="416" width="24" height="12" rx="2"/>
+<text class="leg" x="652" y="425">not reproduced</text>
+</svg>
