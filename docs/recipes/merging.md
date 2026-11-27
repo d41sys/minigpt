@@ -272,6 +272,25 @@ no measurable difference (ranges overlap: 0.368-0.392 against 0.346-0.382). RFT 
 run by about 8-15x. Both arms had two tuning points on seed-0 validation tasks, but the 1-digit
 validation groups have 15 and 2 tasks.
 
+## Follow-up: expert seeds 1-3, RFT vs tuned OPD (predeclared before running)
+
+Weak point of the two comparisons above: every expert was seed 0, so the seed ranges cover
+student noise only. Here the experts change too. For each seed `s` in {1, 2, 3} the SFT and then
+SFT+GRPO expert pair is rebuilt with `--seed s` (same base `runs/student_sft`, same commands and
+flags as the first set, 300 GRPO steps), and the two consolidation arms run with student seed `s`
+on that pair: RFT (`reason-rft`, both samplers, 2000 tasks, k 8, keep 2, 2 epochs, lr 5e-5) and
+tuned OPD (`opd`, both teachers, `--optimizer muon --lr 3e-4`, 500 steps, 8 tasks per step, full
+estimator, `--eval-every 100 --eval-tasks 200`). Seed 0 is the existing pair and rows above
+(RFT 0.392, tuned OPD 0.362); nothing is rerun for it. So each arm has 4 seeds in which teacher
+and student noise both vary. Merging is skipped (it collapsed twice). GPUs 2 and 3 of the Korea
+server, shared with other users; GPU minutes are wall minutes of the consolidation step alone.
+
+Rule (written before any of these runs finished): score = `reason-eval --n 200 --seed 0` per
+operator, final-step model, avg = mean of the six cells. RFT and tuned OPD differ measurably only
+if their 4-seed ranges of avg do not overlap and the gap between the nearest range ends exceeds
+0.05; otherwise "no measurable difference". Each expert's own scores are reported (both
+operators, SFT and SFT+GRPO). No lr or other setting is tuned in this round.
+
 ## Reproduce
 
 Logs: `runs/logs/merge/*.log` (training `.log`, wall seconds `.time`, `ev_*` = `reason-eval`).
