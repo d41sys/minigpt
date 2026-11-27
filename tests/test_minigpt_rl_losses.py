@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 import torch
 
-from minigpt.grpo import group_advantages, grpo_loss, train_grpo
+from minigpt.grpo import clip_fraction, group_advantages, grpo_loss, train_grpo
 from minigpt.model import GPTConfig, GPTModel
 from minigpt.reason import reasoning_tokenizer
 
@@ -78,6 +78,19 @@ def test_cispo_keeps_the_gradient_of_clipped_tokens() -> None:
     assert _grad(0.5, 2.0, clip_eps=0.2, beta=0.0).abs().sum() == 0.0  # PPO control
     g = _grad(0.1, 1.0, **kw)  # inside the range the weight is the ratio itself
     assert torch.allclose(g, torch.full((1, 3), -math.exp(0.1) / 3))
+
+
+def test_clip_fraction_counts_masked_tokens_beyond_the_bounds() -> None:
+    old = torch.zeros(2, 3)
+    logps = torch.log(torch.tensor([[1.1, 1.5, 0.5], [3.0, 1.0, 9.0]]))
+    mask = torch.tensor([[1, 1, 1], [1, 1, 0]], dtype=torch.bool)  # the 9.0 is padding
+    # ppo [0.8, 1.3]: 1.5, 0.5, 3.0 hit
+    assert clip_fraction(logps, old, mask, 0.2, 0.3) == pytest.approx(3 / 5)
+    # cispo, no lower bound: only 1.5 and 3.0 exceed 1.3
+    assert clip_fraction(logps, old, mask, 1.0, 0.3, "cispo") == pytest.approx(2 / 5)
+    # per-sequence geometric means: row 0 is 0.94 (inside), row 1 is sqrt(3) (hit, 2 tokens)
+    assert clip_fraction(logps, old, mask, 0.2, 0.3, "gspo") == pytest.approx(2 / 5)
+    assert clip_fraction(old, old, mask, 0.2) == 0.0
 
 
 def test_loss_aggregations_weight_tokens_as_documented() -> None:
