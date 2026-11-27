@@ -1323,7 +1323,7 @@ def run_grpo(
 
 
 def cmd_grpo(args: argparse.Namespace) -> None:
-    reward_fn = default_reward
+    reward_fn: RewardFn = default_reward
     if args.prm:
         prm = load_reward_model(require(Path(args.prm), "prm")).to(get_device()).eval()
         reward_fn = prm_shaped_reward(default_reward, prm, reasoning_tokenizer(), args.prm_weight)

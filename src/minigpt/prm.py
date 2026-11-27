@@ -214,16 +214,19 @@ def best_of_n(
     """`result[selector][n][digits]`: accuracy of the answer each selector picks from the first
     `n` samples. `random` is the exact expectation (share correct among the first `n`);
     `oracle` is pass@n. Ties go to the earliest sample."""
-    picks: dict[str, Callable[[int, int], float]] = {}
 
     def right(i: int, j: int) -> float:
         return accuracy_reward(samples[i].task, samples[i].texts[j])
 
-    picks["random"] = lambda i, n: sum(right(i, j) for j in range(n)) / n
-    picks["majority"] = lambda i, n: right(i, majority_index(samples[i].texts[:n]))
-    picks["oracle"] = lambda i, n: max(right(i, j) for j in range(n))
-    for name, per_task in scores.items():
-        picks[name] = lambda i, n, p=per_task: right(i, max(range(n), key=lambda j: p[i][j]))
+    def argmax_of(per_task: list[list[float]]) -> Callable[[int, int], float]:
+        return lambda i, n: right(i, max(range(n), key=lambda j: per_task[i][j]))
+
+    picks: dict[str, Callable[[int, int], float]] = {
+        "random": lambda i, n: sum(right(i, j) for j in range(n)) / n,
+        "majority": lambda i, n: right(i, majority_index(samples[i].texts[:n])),
+        "oracle": lambda i, n: max(right(i, j) for j in range(n)),
+        **{name: argmax_of(per_task) for name, per_task in scores.items()},
+    }
     digits = sorted({len(str(s.task.a)) for s in samples})
     result: dict[str, dict[int, dict[int, float]]] = {}
     for name, pick in picks.items():
