@@ -99,7 +99,7 @@ def make_examples(
     sums: Range = (0, 1998),
 ) -> list[Example]:
     """`n` examples with a sum in `sums`: operands (1-3 digits each) drawn until they fit."""
-    out = []
+    out: list[Example] = []
     while len(out) < n:
         task = make_task(rng, rng.randint(1, 3))
         if sums[0] <= int(task.answer) <= sums[1]:
@@ -217,6 +217,9 @@ def collect(model: GPTModel, tok: BPETokenizer, examples: list[Example]) -> Batc
 class Probe(nn.Module):
     """Standardised linear probe: one logit per pooled hidden state."""
 
+    mu: torch.Tensor
+    sd: torch.Tensor
+
     def __init__(self, x: torch.Tensor) -> None:
         super().__init__()
         self.register_buffer("mu", x.mean(0))
@@ -234,7 +237,7 @@ def fit_probe(x: torch.Tensor, y: torch.Tensor, steps: int = 300) -> Probe:
     opt = torch.optim.Adam(probe.parameters(), lr=0.05, weight_decay=1e-3)
     for _ in range(steps):
         opt.zero_grad()
-        F.binary_cross_entropy_with_logits(probe(x), y.float()).backward()
+        F.binary_cross_entropy_with_logits(probe(x), y.float()).backward()  # type: ignore[no-untyped-call]
         opt.step()
     return probe
 
@@ -261,9 +264,12 @@ def fit_classifier(
 ) -> GPTForClassification:
     """Train a small classifier from scratch on 90% of the data (the rest is only monitored)."""
     cut = len(texts) * 9 // 10
-    make = lambda t, y, shuffle: DataLoader(  # noqa: E731
-        SpamTextDataset(t, y, tok, max_length), batch_size=32, shuffle=shuffle
-    )
+
+    def make(
+        t: list[str], y: list[int], shuffle: bool
+    ) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
+        return DataLoader(SpamTextDataset(t, y, tok, max_length), batch_size=32, shuffle=shuffle)
+
     clf = make_classifier(tok, max_length)
     train_classifier(
         clf,
@@ -349,7 +355,7 @@ def run_seed(
 
 def pooled(res: dict[str, Any], guard: str, sets: tuple[str, ...], key: str = "rate") -> float:
     """Mean over equally sized sets of `res[key][guard][set]`."""
-    return sum(res[key][guard][s] for s in sets) / len(sets)
+    return float(sum(res[key][guard][s] for s in sets)) / len(sets)
 
 
 def asr(res: dict[str, Any], guard: str, sets: tuple[str, ...] = ATTACKS) -> float:
@@ -365,9 +371,14 @@ def measurable(a: list[float], b: list[float]) -> bool:
 
 def verdicts(runs: list[dict[str, Any]]) -> list[str]:
     """The two pre-registered claims (docs/recipes/constitutional-classifiers.md)."""
-    mean = lambda xs: sum(xs) / len(xs)  # noqa: E731
-    cost = lambda g: mean([pooled(r, g, tuple(EVAL_SETS), "flops") for r in runs])  # noqa: E731
-    out = []
+
+    def mean(xs: list[float]) -> float:
+        return sum(xs) / len(xs)
+
+    def cost(g: str) -> float:
+        return mean([pooled(r, g, tuple(EVAL_SETS), "flops") for r in runs])
+
+    out: list[str] = []
     for g, extra in (
         ("probe", cost("probe") <= 0.1 * cost("output")),
         ("cascade", cost("cascade") < cost("output")),
