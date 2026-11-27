@@ -12,6 +12,7 @@ samples). Pairs for DPO are (correct, incorrect) samples of the same prompt, as 
 from __future__ import annotations
 
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
@@ -66,6 +67,24 @@ def sample_tasks(
     return [
         Sampled(t, p, c, [decode_completion(tok, r) for r in c])
         for t, p, c in zip(tasks, prompts, ids, strict=True)
+    ]
+
+
+def sample_by_op(
+    samplers: Mapping[str, GPTModel],
+    tok: BPETokenizer,
+    tasks: list[Task],
+    k: int,
+    max_new_tokens: int,
+    temperature: float = 1.0,
+) -> list[Sampled]:
+    """`sample_tasks` with `samplers[task.op]` completing each task (one expert per operator)."""
+    return [
+        s
+        for op, model in samplers.items()
+        for s in sample_tasks(
+            model, tok, [t for t in tasks if t.op == op], k, max_new_tokens, temperature
+        )
     ]
 
 

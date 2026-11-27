@@ -76,6 +76,7 @@ from minigpt.grpo import (
     train_grpo,
 )
 from minigpt.lora import apply_lora, merge_lora
+from minigpt.merge import task_arithmetic
 from minigpt.model import GPTConfig, GPTModel, MoEFeedForward, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
@@ -91,7 +92,7 @@ from minigpt.reason import (
     sample_task,
     sft_trace_dataset,
 )
-from minigpt.rft import preference_pairs, rft_dataset, rm_scores, sample_tasks
+from minigpt.rft import preference_pairs, rft_dataset, rm_scores, sample_by_op, sample_tasks
 from minigpt.rlhf import (
     label_ranked_pairs,
     load_reward_model,
@@ -613,7 +614,7 @@ def load_teachers(specs: list[str], ops: tuple[str, ...]) -> dict[str, GPTModel]
         if not sep or op not in OPS:  # plain PATH (which may itself contain "=")
             op, path = "", spec
         if not Path(path).exists():
-            sys.exit(f"{path} not found: pass --teacher")
+            sys.exit(f"{path} not found")
         model = load_model(path)
         for o in [op] if op else ops:
             teachers[o] = model
@@ -1439,7 +1440,9 @@ def cmd_reason_rft(args: argparse.Namespace) -> None:
     device = get_device()
     tok = reasoning_tokenizer()
     model = load_model(require(Path(args.base), "reason-sft")).to(device)
-    teacher = load_model(require(Path(args.sampler), "grpo")).to(device) if args.sampler else None
+    teachers = None
+    if args.sampler:
+        teachers = {o: m.to(device) for o, m in load_teachers(args.sampler, args.ops).items()}
     rm = None
     if args.select == "rm":
         rm = load_reward_model(require(Path(args.rm), "reward-model")).to(device).eval()
@@ -1447,13 +1450,11 @@ def cmd_reason_rft(args: argparse.Namespace) -> None:
     rng = random.Random(args.seed + 2000)
     best_acc, best_state = -1.0, dict[str, Any]()
     for r in range(1, args.rounds + 1):
-        samples = sample_tasks(
-            teacher or model,
-            tok,
-            draw_tasks(args, rng),
-            args.k,
-            args.max_new_tokens,
-            args.temperature,
+        tasks = draw_tasks(args, rng)
+        samples = (
+            sample_by_op(teachers, tok, tasks, args.k, args.max_new_tokens, args.temperature)
+            if teachers
+            else sample_tasks(model, tok, tasks, args.k, args.max_new_tokens, args.temperature)
         )
         scores = rm_scores(rm, samples, device) if rm is not None else None
         data, st = rft_dataset(tok, samples, scores, args.keep)
@@ -1519,6 +1520,19 @@ def cmd_reason_dpo(args: argparse.Namespace) -> None:
     save_checkpoint(Path(args.out), policy, None, step=args.epochs, val_loss=res["final_loss"])
     print("greedy on fixed tasks:")
     print(report_reasoning(policy, tok, args.eval_n, 0, (), args.ops))
+    print(f"checkpoint -> {args.out}")
+
+
+def cmd_merge(args: argparse.Namespace) -> None:
+    base = load_model(require(Path(args.base), "reason-sft"))
+    experts = [load_model(require(Path(p), "reason-sft")) for p in args.expert]
+    try:
+        merged = task_arithmetic(base, experts, args.scale)
+    except ValueError as err:
+        sys.exit(str(err))
+    save_checkpoint(Path(args.out), merged, None, step=0, val_loss=float("nan"))
+    scale = 1 / len(experts) if args.scale is None else args.scale
+    print(f"merged {len(experts)} expert(s), scale {scale:.3f}")
     print(f"checkpoint -> {args.out}")
 
 
@@ -1860,7 +1874,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("reason-rft", help="rejection-sampling fine-tuning / expert iteration")
     s.add_argument("--base", default=str(REASON_SFT_CKPT), help="the model that is fine-tuned")
-    s.add_argument("--sampler", default=None, help="sample from this model instead (1 round)")
+    s.add_argument(
+        "--sampler",
+        action="append",
+        help="sample from this model instead (1 round): OP=PATH or PATH, repeatable like "
+        "opd --teacher",
+    )
     s.add_argument("--select", choices=["verifier", "rm"], default="verifier")
     s.add_argument("--rm", default=None, help="reward model checkpoint for --select rm")
     s.add_argument("--rounds", type=int, default=1, help="the best round seeds the next")
@@ -1898,6 +1917,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_ops_arg(s)
     s.add_argument("--out", required=True)
     s.set_defaults(func=cmd_reason_dpo)
+
+    s = sub.add_parser("merge", help="task arithmetic: base + L * sum(expert - base)")
+    s.add_argument("--base", required=True, help="checkpoint the experts were fine-tuned from")
+    s.add_argument("--expert", action="append", required=True, help="repeatable")
+    s.add_argument("--scale", type=float, default=None, help="L; default 1/n (average the deltas)")
+    s.add_argument("--out", required=True)
+    s.set_defaults(func=cmd_merge)
 
     s = sub.add_parser("generate", help="sample text")
     s.add_argument("--prompt", default="ROMEO:")
