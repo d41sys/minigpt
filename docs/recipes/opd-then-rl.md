@@ -11,7 +11,9 @@ student and two RL specialists (`+`, `-`, 1 to 3 digits). Four seeds per arm, fi
 n = 200 tasks per digit and operator. Toy results: the papers give the recipe shape only.
 
 **Outcome: neither claim is supported at this scale.** No pair of arms passed the
-pre-registered rule, on accuracy or on pass@8.
+pre-registered rule, on accuracy or on pass@8. **Round 2** (below), with OPD run at the tuned
+Muon optimizer, gives the same verdict on both claims; what it does show is that OPD with Muon
+alone (M 0.388) beats both GRPO alone (0.239) and the default-optimizer OPD of round 1 (0.240).
 
 ## Setup
 
@@ -169,6 +171,107 @@ Gap = lowest seed of the first arm minus highest seed of the second; a gap above
 - OPD uses the full-vocabulary reverse KL at lr 3e-4, the repo defaults; no tuning.
 - Not tested: other switch rules or budgets, a mixed teacher set during RL, larger students.
 
+## Round 2: OPD with Muon (predeclared before running)
+
+Round 1 distilled at the untuned default (AdamW 3e-4) and its switch rule stopped OPD after 100
+to 200 steps, so C and E were mostly GRPO. Two other experiments found `opd --optimizer muon`
+(lr 3e-4) clearly better than the default ([deepseek-v4.md](deepseek-v4.md) section 3, the tuned
+OPD in [merging.md](merging.md)). Round 2 repeats the comparison with it. Nothing else changes:
+same student, teachers, 600-step budget, scoring (M, pass@8, n = 200), seeds 0-3, final-step
+models, same `opd` evals every 50 steps on 200 held-out tasks (logging only, no early stop).
+
+| arm | recipe |
+|---|---|
+| A' | `grpo --ops +,-` 600 steps from the student (round 1's A numbers are reused only if this code reproduces A seed 0 cell for cell; otherwise A' is rerun on all 4 seeds) |
+| B' | `opd --optimizer muon` (reverse KL, RL teachers) 600 steps |
+| C' | `opd --optimizer muon` RL teachers 300 fixed steps, then `grpo` 300 steps |
+| E' | as C' with the raw (SFT) teachers |
+
+`grpo` after the OPD phase keeps its default optimizer (AdamW); only `opd` uses Muon. Same verdict
+rule as round 1: X beats Y only if the 4 seed values of M do not overlap **and** the gap
+(lowest X minus highest Y) exceeds 0.05; otherwise "no measurable difference"; the same rule is
+applied to mean pass@8. Claim 1' = C' beats A' and B'; claim 2' = C' beats E'. Check: B' vs round
+1's B (Muon against default optimizer, same rule). Nothing is changed after seeing results
+except what is labelled post-hoc.
+
+### Round 2 results
+
+Same scoring as round 1 (greedy accuracy `+` 1/2/3 then `-` 1/2/3; M = their mean; pass@8 = mean
+over the same six cells; steps = OPD / GRPO). **A' is round 1's A**: the rerun of A seed 0 on
+this code gave 0.66 / 0.18 / 0.01 / 0.57 / 0.14 / 0.01, M 0.259, pass@8 0.432 (OPD-free, only
+`grpo`), the same as round 1's printed values, so seeds 1-3 were not rerun (round 1's logs are
+gone, so the match is at the table's printed precision: the rerun's raw cells are 0.005 and
+0.135 where round 1 shows 0.01 and 0.14). Wall seconds are on busy shared GPUs (jobs moved
+between GPU 0 and GPU 1 during the run), so they are rough; round 1's wall times for A' (1321 /
+936 / 922 / 891 s) are not comparable with round 2's.
+
+| arm | seed | steps | greedy acc | M | pass@8 | wall s |
+|---|---|---|---|---|---|---|
+| A' | 0 | 0 / 600 | 0.66 / 0.18 / 0.01 / 0.57 / 0.14 / 0.01 | 0.259 | 0.432 | 1321 (round 1; rerun 2332) |
+| A' | 1 | 0 / 600 | 0.62 / 0.17 / 0.03 / 0.48 / 0.10 / 0.00 | 0.233 | 0.435 | 936 (round 1) |
+| A' | 2 | 0 / 600 | 0.71 / 0.14 / 0.01 / 0.62 / 0.15 / 0.00 | 0.273 | 0.448 | 922 (round 1) |
+| A' | 3 | 0 / 600 | 0.54 / 0.12 / 0.00 / 0.45 / 0.04 / 0.01 | 0.192 | 0.410 | 891 (round 1) |
+| B' | 0 | 600 / 0 | 0.82 / 0.39 / 0.05 / 0.71 / 0.35 / 0.04 | 0.393 | 0.564 | 836 |
+| B' | 1 | 600 / 0 | 0.81 / 0.42 / 0.03 / 0.76 / 0.20 / 0.03 | 0.372 | 0.560 | 392 |
+| B' | 2 | 600 / 0 | 0.73 / 0.38 / 0.03 / 0.81 / 0.18 / 0.03 | 0.359 | 0.552 | 328 |
+| B' | 3 | 600 / 0 | 0.92 / 0.48 / 0.04 / 0.81 / 0.30 / 0.01 | 0.427 | 0.567 | 339 |
+| C' | 0 | 300 / 300 | 0.78 / 0.32 / 0.04 / 0.77 / 0.24 / 0.03 | 0.360 | 0.528 | 1588 |
+| C' | 1 | 300 / 300 | 0.69 / 0.13 / 0.01 / 0.58 / 0.16 / 0.01 | 0.265 | 0.481 | 628 |
+| C' | 2 | 300 / 300 | 0.70 / 0.15 / 0.01 / 0.60 / 0.15 / 0.01 | 0.271 | 0.465 | 642 |
+| C' | 3 | 300 / 300 | 0.53 / 0.28 / 0.01 / 0.52 / 0.14 / 0.01 | 0.247 | 0.452 | 625 |
+| E' | 0 | 300 / 300 | 0.82 / 0.23 / 0.03 / 0.65 / 0.18 / 0.01 | 0.320 | 0.480 | 881 |
+| E' | 1 | 300 / 300 | 0.70 / 0.19 / 0.01 / 0.84 / 0.20 / 0.01 | 0.328 | 0.514 | 615 |
+| E' | 2 | 300 / 300 | 0.79 / 0.28 / 0.02 / 0.62 / 0.12 / 0.01 | 0.306 | 0.467 | 633 |
+| E' | 3 | 300 / 300 | 0.66 / 0.18 / 0.01 / 0.68 / 0.17 / 0.01 | 0.283 | 0.484 | 606 |
+
+Arms, mean (min..max over 4 seeds); B is round 1's default-optimizer OPD, for the check:
+
+| arm | M | mean pass@8 |
+|---|---|---|
+| A' GRPO only | 0.239 (0.192..0.273) | 0.431 (0.410..0.448) |
+| B' OPD-Muon, 600 steps | 0.388 (0.359..0.427) | 0.561 (0.552..0.567) |
+| C' OPD-Muon 300, then GRPO 300 | 0.286 (0.247..0.360) | 0.482 (0.452..0.528) |
+| E' as C', raw teachers | 0.309 (0.283..0.328) | 0.486 (0.467..0.514) |
+| B (round 1, default OPD) | 0.240 (0.198..0.265) | 0.431 (0.420..0.440) |
+
+Verdicts (gap = lowest seed of the first arm minus highest of the second; above 0.05 needed;
+A' and B values from round 1's table):
+
+| comparison | M gap | pass@8 gap | verdict |
+|---|---|---|---|
+| claim 1': C' vs A' | -0.026 | +0.004 | no measurable difference |
+| claim 1': C' vs B' | -0.181 | -0.114 | C' does not beat B' |
+| claim 2': C' vs E' (raw teachers) | -0.082 | -0.062 | no measurable difference |
+| check: B' vs B (Muon vs default OPD) | +0.094 | +0.112 | **B' beats B**, measurable |
+| not predeclared, same rule: B' vs A' | +0.086 | +0.104 | **B' beats A'**, measurable |
+| not predeclared, same rule: B' vs C' | -0.001 | +0.024 | no measurable difference |
+| not predeclared, same rule: B' vs E' | +0.031 | +0.038 | no measurable difference |
+
+- **Claim 1' (OPD then RL beats either alone): not supported.** C' (M 0.286) is level with A'
+  (0.239) under the rule and below B' (0.388). The measurable effect of round 2 is the optimizer:
+  OPD with Muon (B') beats both round 1's default-optimizer OPD (B) and GRPO alone (A') on M
+  and on pass@8, with ranges 0.09 to 0.10 apart. Adding GRPO after distillation did not help:
+  B' against C' fails the rule by 0.001 only because of C' seed 0 (0.360, against 0.247 to
+  0.271 for the other three), so there is no measurable difference but the mean gap is 0.10.
+- **Claim 2' (teachers must be RL-trained): not supported.** E' (0.309) is not below C'
+  (0.286); ranges overlap (E' 0.283..0.328, C' 0.247..0.360), as in round 1.
+- **Check (Muon vs default):** yes. Round 1's B (AdamW, lr 3e-4) gave M 0.240; Muon at the same
+  lr gave 0.388. Same direction as [merging.md](merging.md) and [deepseek-v4.md](deepseek-v4.md).
+  It shows up mostly on 2-digit tasks.
+- **Descriptive, post-hoc (not tested with the rule):** averaged over seeds and both operators,
+  2-digit greedy accuracy is 0.34 for B', 0.20 for C', 0.19 for E' and about 0.13 for A'. The
+  OPD phase of C' is B' cut at step 300: the held-out evals at step 300 are identical in all four
+  seeds (e.g. 0.350 and 0.240 for seeds 0 and 1 in both logs). B''s held-out greedy accuracy
+  rises from a mean of 0.286 at step 300 to 0.369 at step 600. So C' trades the last 300 OPD
+  steps for 300 GRPO steps, and its mean M is 0.10 lower. [INFERENCE] GRPO's reward is mostly
+  1-digit, which the student already does; the extra distillation still improves 2 digits.
+
+Round 2 limits: `grpo` after the Muon-trained OPD checkpoint keeps its default (AdamW, untuned),
+so an optimizer mismatch or a different GRPO lr could change C' and E'. A' reuses round 1's
+numbers (one-seed reproduction check, at printed precision). Muon lr 3e-4 was not tuned for
+this setup. The seed-0 spread of C' (0.360) is the main reason C' versus B' is not measurable;
+four seeds do not resolve it. Everything else of the round 1 limits applies.
+
 ## Reproduce
 
 Logs: `runs/logs/og_*.log` (training), `og_eval_*_op{+,-}.log` (`reason-eval`), `.time` wall
@@ -187,4 +290,13 @@ minigpt opd $T --student runs/D_off/ckpt.pt $O --steps 300 --patience 2 --seed 0
 minigpt opd $T --student $S $O --steps 300 --seed 0 --out runs/F_opd/ckpt.pt                   # F
 minigpt grpo --base runs/F_opd/ckpt.pt --ops +,- --steps 300 --seed 0 --out runs/F/ckpt.pt
 minigpt reason-eval --checkpoint runs/C/ckpt.pt --ops + --n 200 --pass-k 8
+```
+
+Round 2 (Muon): logs `runs/logs/og2_*`; each OPD phase adds `--optimizer muon` (lr stays 3e-4)
+and has no `--patience`; `grpo` is unchanged. Raw teachers for E': as above.
+
+```bash
+minigpt opd $T --student $S $O --optimizer muon --steps 600 --seed 0 --out runs/B2/ckpt.pt      # B'
+minigpt opd $T --student $S $O --optimizer muon --steps 300 --seed 0 --out runs/C2_opd/ckpt.pt # C'
+minigpt grpo --base runs/C2_opd/ckpt.pt --ops +,- --steps 300 --seed 0 --out runs/C2/ckpt.pt
 ```
