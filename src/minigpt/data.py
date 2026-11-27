@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -77,3 +77,34 @@ def create_dataloader(
         drop_last=drop_last and len(dataset) >= batch_size,
         num_workers=num_workers,
     )
+
+
+class MixedLoader:
+    """Training batches with `round(frac * batch_size)` windows from `replay_ids`, the rest from
+    `ids`. One pass over `ids` is one epoch.
+
+    shortcut: an epoch ends when the shorter source runs out, so `replay_ids` should be the larger
+    corpus; upgrade if replay is ever smaller than the domain data.
+    """
+
+    def __init__(
+        self,
+        ids: Sequence[int],
+        replay_ids: Sequence[int],
+        context_length: int,
+        batch_size: int,
+        frac: float,
+        stride: int | None = None,
+    ) -> None:
+        if not 0.0 <= frac <= 1.0:
+            raise ValueError(f"replay fraction must be in [0, 1], got {frac}")
+        n_replay = round(frac * batch_size)
+        self.loaders = [
+            create_dataloader(src, context_length, n, stride=stride)
+            for src, n in ((ids, batch_size - n_replay), (replay_ids, n_replay))
+            if n > 0
+        ]
+
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        for parts in zip(*self.loaders, strict=False):
+            yield torch.cat([x for x, _ in parts]), torch.cat([y for _, y in parts])

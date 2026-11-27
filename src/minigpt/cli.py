@@ -18,7 +18,7 @@ import random
 import sys
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,7 @@ from minigpt.cai import (
     sample_responses,
     split_prompts,
 )
-from minigpt.data import create_dataloader, split_val_test
+from minigpt.data import MixedLoader, create_dataloader, split_val_test
 from minigpt.dpo import (
     PreferenceDataset,
     PreferenceSample,
@@ -75,6 +75,7 @@ from minigpt.grpo import (
     make_shaper,
     train_grpo,
 )
+from minigpt.lora import apply_lora, merge_lora
 from minigpt.merge import task_arithmetic
 from minigpt.model import GPTConfig, GPTModel, MoEFeedForward, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
@@ -202,6 +203,13 @@ def tinystories_splits(tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
     return ids[:n], ids[n:]
 
 
+CORPUS_NAMES = ("tinyshakespeare", "tinystories")
+
+
+def corpus_splits(name: str, tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
+    return (tinystories_splits if name == "tinystories" else shakespeare_splits)(tokenizer)
+
+
 def load_alpaca() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = json.loads(
         download_alpaca_data(RAW_DIR / "alpaca_1k.json").read_text("utf-8")
@@ -291,32 +299,49 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
     tok = load_tokenizer()
-    splits = tinystories_splits if args.corpus == "tinystories" else shakespeare_splits
-    train_ids, held_ids = splits(tok)
+    train_ids, held_ids = corpus_splits(args.corpus, tok)
     val_ids, test_ids = split_val_test(held_ids)
     print(
         f"device={device} train_tokens={len(train_ids):,} "
         f"val_tokens={len(val_ids):,} test_tokens={len(test_ids):,}"
     )
-    cfg = GPTConfig(
-        vocab_size=tok.vocab_size,
-        context_length=args.context_length,
-        d_model=args.d_model,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        dropout=args.dropout,
-        pos_encoding=args.pos_encoding,
-        use_sdpa=True,
-        **arch_kwargs(args),
-    )
-    model = GPTModel(cfg)
+    if args.init:  # continued pretraining: architecture comes from the checkpoint, not the flags
+        model = load_model(require(Path(args.init), "pretrain"))
+        cfg = model.config
+        if cfg.vocab_size != tok.vocab_size:
+            sys.exit(f"{args.init} has vocab {cfg.vocab_size}, tokenizer has {tok.vocab_size}")
+    else:
+        cfg = GPTConfig(
+            vocab_size=tok.vocab_size,
+            context_length=args.context_length,
+            d_model=args.d_model,
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            dropout=args.dropout,
+            pos_encoding=args.pos_encoding,
+            use_sdpa=True,
+            **arch_kwargs(args),
+        )
+        model = GPTModel(cfg)
     print(f"params={sum(p.numel() for p in model.parameters()):,}")
     if cfg.n_experts:
         print(f"active params={count_parameters(model, active=True):,}")
     stride = 1 if args.sampling == "random" else None
-    train_loader = create_dataloader(
-        train_ids, cfg.context_length, args.batch_size, stride=stride, shuffle=True
-    )
+    replay_halves: dict[str, list[int]] = {}  # scored at the end; mixed into batches if frac > 0
+    if args.replay_corpus:
+        replay_train, replay_held = corpus_splits(args.replay_corpus, tok)
+        replay_val, replay_test = split_val_test(replay_held)
+        replay_halves = {"replay_val": replay_val, "replay_test": replay_test}
+    elif args.replay_frac:
+        sys.exit("--replay-frac needs --replay-corpus")
+    if args.replay_frac > 0:
+        train_loader: Iterable[tuple[torch.Tensor, torch.Tensor]] = MixedLoader(
+            train_ids, replay_train, cfg.context_length, args.batch_size, args.replay_frac, stride
+        )
+    else:
+        train_loader = create_dataloader(
+            train_ids, cfg.context_length, args.batch_size, stride=stride, shuffle=True
+        )
     val_loader = create_dataloader(
         val_ids, cfg.context_length, args.batch_size, shuffle=False, drop_last=False
     )
@@ -326,7 +351,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         train_loader,
         val_loader,
         max_steps=args.steps,
-        warmup_steps=max(1, args.steps // 20),
+        warmup_steps=0 if args.constant_lr else max(1, args.steps // 20),
         learning_rate=args.lr,
         eval_interval=args.eval_interval,
         checkpoint_dir=Path("runs") / args.name,
@@ -334,6 +359,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         grad_accum_steps=args.grad_accum,
         bf16=args.bf16,
         optim=args.optim,
+        min_lr_ratio=1.0 if args.constant_lr else 0.1,
     )
     seconds = time.perf_counter() - t0
     for row in res["history"]:
@@ -345,12 +371,12 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     print(f"val loss step0={v0:.4f} best={v1:.4f} drop={(v0 - v1) / v0 * 100:.1f}%")
     print(f"checkpoint -> {res['checkpoint_path']}")
     if args.final:  # the model as training left it, not the val-selected checkpoint
-        halves = {"train": train_ids, "val": val_ids, "test": test_ids}
+        halves = {"train": train_ids, "val": val_ids, "test": test_ids} | replay_halves
         payload, label = {"step": args.steps - 1}, "final model"
     else:
         ckpt = Path(res["checkpoint_path"])
         payload, label = load_checkpoint(ckpt, model, device=device), "val-selected checkpoint"
-        halves = {"val": val_ids, "test": test_ids}
+        halves = {"val": val_ids, "test": test_ids} | replay_halves
     losses = half_losses(model, halves, args.batch_size, device)
     print(f"{label} (step {payload['step']}): {format_half_losses(losses)}")
     if args.results_out:
@@ -369,6 +395,11 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
             "test_window_losses": losses["test"],
             "val_loss": float(np.mean(losses["val"])),
             "test_loss": float(np.mean(losses["test"])),
+            "init": args.init,
+            "replay_corpus": args.replay_corpus,
+            "replay_frac": args.replay_frac,
+            "replay_val_loss": float(np.mean(losses["replay_val"])) if replay_halves else None,
+            "replay_test_loss": float(np.mean(losses["replay_test"])) if replay_halves else None,
             "final": args.final,
             "train_eval_loss": float(np.mean(losses["train"])) if args.final else None,
             "params": count_parameters(model),
@@ -539,6 +570,40 @@ def add_optim_arg(s: argparse.ArgumentParser) -> None:
         default="adamw",
         help="muon: Muon on hidden 2-D weights, AdamW on the rest (DeepSeek-V4 report 2.4)",
     )
+
+
+def add_lora_args(s: argparse.ArgumentParser) -> None:
+    s.add_argument(
+        "--lora-rank",
+        type=int,
+        default=0,
+        help="LoRA rank R: freeze the model, train B @ A on the linears; the saved checkpoint is "
+        "merged (plain GPT). 0 = full fine-tuning",
+    )
+    s.add_argument(
+        "--lora-alpha", type=float, default=16.0, help="LoRA scale is alpha / R (default 16)"
+    )
+    s.add_argument(
+        "--lora-targets",
+        choices=["all", "attn"],
+        default="all",
+        help="all: attention + MLP linears; attn: attention projections only",
+    )
+    s.add_argument(
+        "--lora-embed",
+        action="store_true",
+        help="also train the token embeddings and the tied LM head (for tokens the base never saw)",
+    )
+
+
+def start_lora(model: GPTModel, args: argparse.Namespace) -> None:
+    if args.lora_rank:
+        total = sum(p.numel() for p in model.parameters())
+        n = apply_lora(model, args.lora_rank, args.lora_alpha, args.lora_targets, args.lora_embed)
+        print(
+            f"lora rank={args.lora_rank} alpha={args.lora_alpha:g} targets={args.lora_targets} "
+            f"embed={args.lora_embed} trainable={n:,} of {total:,}"
+        )
 
 
 def load_teachers(specs: list[str], ops: tuple[str, ...]) -> dict[str, GPTModel]:
@@ -1106,6 +1171,7 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     device = get_device()
     tok = reasoning_tokenizer()
     model = load_model(require(Path(args.base), "reason-pretrain"))
+    start_lora(model, args)
     rng = random.Random(args.seed + 1000)  # apart from the fixed tasks of `reason-eval`
     tasks = [sample_task(rng, rng.randint(1, args.max_digits), args.ops) for _ in range(args.n)]
     ops = ",".join(args.ops)
@@ -1121,6 +1187,7 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     )
     for row in res["history"]:
         print(f"epoch {row['epoch']} loss {row['loss']:.4f}")
+    merge_lora(model)
     save_checkpoint(Path(args.out), model, None, step=args.epochs, val_loss=res["final_loss"])
     print(f"checkpoint -> {args.out}")
 
@@ -1147,6 +1214,9 @@ def run_grpo(
     device = get_device()
     tok = reasoning_tokenizer()
     policy = load_model(require(Path(args.base), "reason-sft"))
+    if args.lora_rank and args.ref_reset_every:
+        sys.exit("--lora-rank cannot be combined with --ref-reset-every")
+    start_lora(policy, args)
     ref = load_model(args.base)
     print(
         f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm} "
@@ -1222,6 +1292,7 @@ def run_grpo(
         device=device,
     )
     out = Path(args.out)
+    merge_lora(policy)
     save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
     (out.parent / "history.json").write_text(json.dumps(res["history"]), encoding="utf-8")
     print("greedy on fixed tasks, SFT start:")
@@ -1349,6 +1420,7 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         "optimizer (ProRL); 0 = never",
     )
     add_optim_arg(s)
+    add_lora_args(s)
     add_ops_arg(s)
     s.add_argument("--out", default=str(out))
 
@@ -1493,7 +1565,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", default="pretrain")
     s.add_argument(
         "--corpus",
-        choices=["tinyshakespeare", "tinystories"],
+        choices=CORPUS_NAMES,
         default="tinyshakespeare",
         help="pretraining text (default: tiny-Shakespeare)",
     )
@@ -1528,6 +1600,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--final",
         action="store_true",
         help="score the final-step model (adds the train split), not the best-val checkpoint",
+    )
+    s.add_argument(
+        "--init",
+        default=None,
+        help="continue pretraining from this checkpoint (its config replaces the arch flags); "
+        "the LR re-warms from 0 to --lr, then decays",
+    )
+    s.add_argument(
+        "--replay-corpus",
+        choices=CORPUS_NAMES,
+        default=None,
+        help="also score this corpus's val/test halves; with --replay-frac, mix it into batches",
+    )
+    s.add_argument(
+        "--replay-frac",
+        type=float,
+        default=0.0,
+        help="fraction of each batch's windows drawn from --replay-corpus (default 0)",
+    )
+    s.add_argument(
+        "--constant-lr",
+        action="store_true",
+        help="constant --lr from step 0: no warm-up, no decay",
     )
     add_arch_args(s)
     add_optim_arg(s)
@@ -1758,6 +1853,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_ops_arg(s)
     s.add_argument("--out", default=str(REASON_SFT_CKPT))
     add_optim_arg(s)
+    add_lora_args(s)
     s.set_defaults(func=cmd_reason_sft)
 
     s = sub.add_parser("reason-eval", help="greedy accuracy / format / length, 1-5 digits")

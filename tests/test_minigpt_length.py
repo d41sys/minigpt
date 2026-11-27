@@ -73,9 +73,9 @@ def test_estimate_budgets_has_one_mean_per_effort_and_digit_count() -> None:
 def test_train_grpo_scores_groups_through_the_shaper(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[torch.Tensor] = []
 
-    def fake_step(*args: Any, **_kw: Any) -> float:
+    def fake_step(*args: Any, **_kw: Any) -> tuple[float, float]:
         seen.append(args[5])
-        return 0.0
+        return 0.0, 0.0
 
     monkeypatch.setattr(grpo, "grpo_step", fake_step)
     calls: list[tuple[int, int | None, int]] = []

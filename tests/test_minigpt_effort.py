@@ -49,9 +49,9 @@ def test_each_group_has_one_effort_and_levels_are_sampled_for_the_same_tasks(
     tok = reasoning_tokenizer()
     seen: list[tuple[list[list[int]], torch.Tensor]] = []
 
-    def fake_step(*args: Any, **_kw: Any) -> float:
+    def fake_step(*args: Any, **_kw: Any) -> tuple[float, float]:
         seen.append((args[3], args[5]))  # prompts (flat, group-major), rewards (groups, G)
-        return 0.0
+        return 0.0, 0.0
 
     monkeypatch.setattr(grpo, "grpo_step", fake_step)
     policy = GPTModel(TINY)
