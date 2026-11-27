@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -251,7 +252,7 @@ def load_model(path: str | Path, device: torch.device | None = None) -> GPTModel
 
 def train(
     model: GPTModel,
-    train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    train_loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
     val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] | None = None,
     max_steps: int = 1000,
     warmup_steps: int = 100,
@@ -265,6 +266,7 @@ def train(
     grad_accum_steps: int = 1,
     bf16: bool = False,
     optim: str = "adamw",
+    min_lr_ratio: float = 0.1,
 ) -> dict[str, Any]:
     """Execute pretraining loop.
 
@@ -296,7 +298,9 @@ def train(
 
     for step in range(max_steps):
         # Update learning rate
-        lr_mult = get_lr_multiplier(step, warmup_steps=warmup_steps, total_steps=max_steps)
+        lr_mult = get_lr_multiplier(
+            step, warmup_steps=warmup_steps, total_steps=max_steps, min_ratio=min_lr_ratio
+        )
         current_lr = learning_rate * lr_mult
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr

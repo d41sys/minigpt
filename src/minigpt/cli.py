@@ -18,7 +18,7 @@ import random
 import sys
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,7 @@ from minigpt.cai import (
     sample_responses,
     split_prompts,
 )
-from minigpt.data import create_dataloader, split_val_test
+from minigpt.data import MixedLoader, create_dataloader, split_val_test
 from minigpt.dpo import (
     PreferenceDataset,
     PreferenceSample,
@@ -201,6 +201,13 @@ def tinystories_splits(tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
     return ids[:n], ids[n:]
 
 
+CORPUS_NAMES = ("tinyshakespeare", "tinystories")
+
+
+def corpus_splits(name: str, tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
+    return (tinystories_splits if name == "tinystories" else shakespeare_splits)(tokenizer)
+
+
 def load_alpaca() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = json.loads(
         download_alpaca_data(RAW_DIR / "alpaca_1k.json").read_text("utf-8")
@@ -290,32 +297,49 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
     device = get_device()
     tok = load_tokenizer()
-    splits = tinystories_splits if args.corpus == "tinystories" else shakespeare_splits
-    train_ids, held_ids = splits(tok)
+    train_ids, held_ids = corpus_splits(args.corpus, tok)
     val_ids, test_ids = split_val_test(held_ids)
     print(
         f"device={device} train_tokens={len(train_ids):,} "
         f"val_tokens={len(val_ids):,} test_tokens={len(test_ids):,}"
     )
-    cfg = GPTConfig(
-        vocab_size=tok.vocab_size,
-        context_length=args.context_length,
-        d_model=args.d_model,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        dropout=args.dropout,
-        pos_encoding=args.pos_encoding,
-        use_sdpa=True,
-        **arch_kwargs(args),
-    )
-    model = GPTModel(cfg)
+    if args.init:  # continued pretraining: architecture comes from the checkpoint, not the flags
+        model = load_model(require(Path(args.init), "pretrain"))
+        cfg = model.config
+        if cfg.vocab_size != tok.vocab_size:
+            sys.exit(f"{args.init} has vocab {cfg.vocab_size}, tokenizer has {tok.vocab_size}")
+    else:
+        cfg = GPTConfig(
+            vocab_size=tok.vocab_size,
+            context_length=args.context_length,
+            d_model=args.d_model,
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            dropout=args.dropout,
+            pos_encoding=args.pos_encoding,
+            use_sdpa=True,
+            **arch_kwargs(args),
+        )
+        model = GPTModel(cfg)
     print(f"params={sum(p.numel() for p in model.parameters()):,}")
     if cfg.n_experts:
         print(f"active params={count_parameters(model, active=True):,}")
     stride = 1 if args.sampling == "random" else None
-    train_loader = create_dataloader(
-        train_ids, cfg.context_length, args.batch_size, stride=stride, shuffle=True
-    )
+    replay_halves: dict[str, list[int]] = {}  # scored at the end; mixed into batches if frac > 0
+    if args.replay_corpus:
+        replay_train, replay_held = corpus_splits(args.replay_corpus, tok)
+        replay_val, replay_test = split_val_test(replay_held)
+        replay_halves = {"replay_val": replay_val, "replay_test": replay_test}
+    elif args.replay_frac:
+        sys.exit("--replay-frac needs --replay-corpus")
+    if args.replay_frac > 0:
+        train_loader: Iterable[tuple[torch.Tensor, torch.Tensor]] = MixedLoader(
+            train_ids, replay_train, cfg.context_length, args.batch_size, args.replay_frac, stride
+        )
+    else:
+        train_loader = create_dataloader(
+            train_ids, cfg.context_length, args.batch_size, stride=stride, shuffle=True
+        )
     val_loader = create_dataloader(
         val_ids, cfg.context_length, args.batch_size, shuffle=False, drop_last=False
     )
@@ -325,7 +349,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         train_loader,
         val_loader,
         max_steps=args.steps,
-        warmup_steps=max(1, args.steps // 20),
+        warmup_steps=0 if args.constant_lr else max(1, args.steps // 20),
         learning_rate=args.lr,
         eval_interval=args.eval_interval,
         checkpoint_dir=Path("runs") / args.name,
@@ -333,6 +357,7 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         grad_accum_steps=args.grad_accum,
         bf16=args.bf16,
         optim=args.optim,
+        min_lr_ratio=1.0 if args.constant_lr else 0.1,
     )
     seconds = time.perf_counter() - t0
     for row in res["history"]:
@@ -344,12 +369,12 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
     print(f"val loss step0={v0:.4f} best={v1:.4f} drop={(v0 - v1) / v0 * 100:.1f}%")
     print(f"checkpoint -> {res['checkpoint_path']}")
     if args.final:  # the model as training left it, not the val-selected checkpoint
-        halves = {"train": train_ids, "val": val_ids, "test": test_ids}
+        halves = {"train": train_ids, "val": val_ids, "test": test_ids} | replay_halves
         payload, label = {"step": args.steps - 1}, "final model"
     else:
         ckpt = Path(res["checkpoint_path"])
         payload, label = load_checkpoint(ckpt, model, device=device), "val-selected checkpoint"
-        halves = {"val": val_ids, "test": test_ids}
+        halves = {"val": val_ids, "test": test_ids} | replay_halves
     losses = half_losses(model, halves, args.batch_size, device)
     print(f"{label} (step {payload['step']}): {format_half_losses(losses)}")
     if args.results_out:
@@ -368,6 +393,11 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
             "test_window_losses": losses["test"],
             "val_loss": float(np.mean(losses["val"])),
             "test_loss": float(np.mean(losses["test"])),
+            "init": args.init,
+            "replay_corpus": args.replay_corpus,
+            "replay_frac": args.replay_frac,
+            "replay_val_loss": float(np.mean(losses["replay_val"])) if replay_halves else None,
+            "replay_test_loss": float(np.mean(losses["replay_test"])) if replay_halves else None,
             "final": args.final,
             "train_eval_loss": float(np.mean(losses["train"])) if args.final else None,
             "params": count_parameters(model),
@@ -1479,7 +1509,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", default="pretrain")
     s.add_argument(
         "--corpus",
-        choices=["tinyshakespeare", "tinystories"],
+        choices=CORPUS_NAMES,
         default="tinyshakespeare",
         help="pretraining text (default: tiny-Shakespeare)",
     )
@@ -1514,6 +1544,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--final",
         action="store_true",
         help="score the final-step model (adds the train split), not the best-val checkpoint",
+    )
+    s.add_argument(
+        "--init",
+        default=None,
+        help="continue pretraining from this checkpoint (its config replaces the arch flags); "
+        "the LR re-warms from 0 to --lr, then decays",
+    )
+    s.add_argument(
+        "--replay-corpus",
+        choices=CORPUS_NAMES,
+        default=None,
+        help="also score this corpus's val/test halves; with --replay-frac, mix it into batches",
+    )
+    s.add_argument(
+        "--replay-frac",
+        type=float,
+        default=0.0,
+        help="fraction of each batch's windows drawn from --replay-corpus (default 0)",
+    )
+    s.add_argument(
+        "--constant-lr",
+        action="store_true",
+        help="constant --lr from step 0: no warm-up, no decay",
     )
     add_arch_args(s)
     add_optim_arg(s)
