@@ -132,8 +132,11 @@ little to the distance from the base (the norm of GRPO minus SFT was not measure
 ## Verdicts
 
 1. Merge vs OPD: measurable, and the merge is worse. 0.020-0.025 lies 0.14 below the OPD range
-   (0.166-0.206), and below the base (0.155). The 2026 claim that merging matches MOPD at a
-   fraction of the cost does not hold in this setup: the merge costs nothing and gives nothing.
+   (0.166-0.206), and below the base (0.155). Choosing L on validation was close to noise (every
+   validation mean is at most 0.011 here), so the result depends on the grid: with these experts
+   every L >= 0.25 collapses (at most 0.033), and L = 0.1 (post hoc) returns roughly the base
+   (0.181-0.182). No L tried beats the base or the experts. The 2026 claim that merging matches
+   MOPD at a fraction of the cost does not hold in this setup.
 2. RFT vs OPD: against untuned OPD, measurable, RFT better (0.368-0.392 against 0.166-0.206,
    gap 0.16, about 1/14 of the GPU time). Against OPD tuned like RFT (two points each on
    validation, Muon 3e-4 won), no measurable difference: 0.368-0.392 against 0.346-0.382
