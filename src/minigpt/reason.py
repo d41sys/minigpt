@@ -262,3 +262,37 @@ def evaluate_reasoning(
     overall = {k: sum(v[k] for v in per_digit.values()) / len(per_digit) for k in per_digit[1]}
     per_op = {op: sum(v) / max(1, len(v)) for op, v in by_op.items()}
     return {**overall, "per_digit": per_digit, "per_op": per_op}
+
+
+@torch.no_grad()
+def evaluate_pass_at_k(
+    model: GPTModel,
+    tok: BPETokenizer,
+    n_per_digit: int,
+    k: int,
+    seed: int = 0,
+    max_new_tokens: int = 100,
+    ops: Sequence[str] = "+",
+    max_digits: int = 3,
+) -> dict[int, float]:
+    """pass@k per digit count 1..`max_digits`: share of fixed tasks with a correct answer among
+    `k` samples at temperature 1 (same tasks as `evaluate_reasoning` with the same seed).
+    Tasks are sampled 20 at a time, so memory stays small on a shared GPU."""
+    rng = random.Random(seed)
+    eos = tok.eos_token_id
+    out: dict[int, float] = {}
+    for d in range(1, max_digits + 1):
+        tasks = [sample_task(rng, d, ops) for _ in range(n_per_digit)]
+        hits = 0
+        for lo in range(0, n_per_digit, 20):
+            chunk = tasks[lo : lo + 20]
+            ids = [tok.encode(t.prompt) for t in chunk]
+            rows = sample_batch(model, ids, k, max_new_tokens, eos)
+            hits += sum(
+                any(
+                    accuracy_reward(t, decode_completion(tok, r)) for r in rows[i * k : (i + 1) * k]
+                )
+                for i, t in enumerate(chunk)
+            )
+        out[d] = hits / n_per_digit
+    return out
