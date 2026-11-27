@@ -182,6 +182,18 @@ no seed range; every number is one run.
 
 (results are added below after the run)
 
+## Follow-up: OPD with RFT's tuning budget (predeclared before running)
+
+RFT got two lr candidates scored on validation; OPD ran untuned. Both now get two points. OPD
+candidates (seed 0, 500 steps, same teachers and student): AdamW `--lr 1e-4` and
+`--optimizer muon --lr 3e-4` (both beat the default in the MOPD tuning of
+[deepseek-v4.md](deepseek-v4.md)). The better mean validation accuracy wins (tie: AdamW 1e-4); it
+then runs on seeds 1-3, seed 0 being the probe, and is scored on test. The comparison to RFT uses
+the same rule as above (seed ranges apart by more than 0.05). The SFT+GRPO experts were deleted
+after the first run, so this follow-up retrains them (`sft2_*`, `grpo2_*`, same commands and seed;
+their scores are reported next to the first set's, since GPU runs need not repeat bit for bit).
+Until this runs, the RFT claim above is only "beats untuned OPD".
+
 ## Reproduce
 
 Logs: `runs/logs/merge/*.log` (training `.log`, wall seconds `.time`, `ev_*` = `reason-eval`).
