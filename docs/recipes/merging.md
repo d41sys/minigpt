@@ -154,8 +154,9 @@ a converged base. Merging lighter experts (below) fails too, so that explanation
 
 ## Limits
 
-- Experts and teachers are seed 0 only: seed ranges cover consolidation noise, not teacher
-  noise. The merge has no seed range at all.
+- Experts and teachers are seed 0 only in the first two tables: their seed ranges cover
+  consolidation noise, not teacher noise (the expert-seed follow-up covers RFT vs tuned OPD, not
+  the merge, which has no seed range at all).
 - The L selection was uninformative: validation accuracy is near zero for every L, so the chosen
   L is close to a tie-break (it is 0.5 for one set and 0.75 for the other; test scores favour 0.5
   for both, by 0.013 in the SFT case).
@@ -291,6 +292,56 @@ if their 4-seed ranges of avg do not overlap and the gap between the nearest ran
 0.05; otherwise "no measurable difference". Each expert's own scores are reported (both
 operators, SFT and SFT+GRPO). No lr or other setting is tuned in this round.
 
+### Expert-seed results
+
+Experts (each trained from the same base with `--seed s`; seed 0 is the first set, above). Cells
+are accuracy on 1 / 2 / 3 digits; GPU min is wall time (SFT+GRPO rows: GRPO + its SFT).
+
+| expert | seed | `+` | `-` | avg | GPU min |
+|---|---|---|---|---|---|
+| SFT `+` | 1 | 1.000 / 0.990 / 0.895 | 0.170 / 0.000 / 0.000 | 0.509 | 1.7 |
+| SFT `+` | 2 | 0.975 / 0.985 / 0.875 | 0.205 / 0.000 / 0.000 | 0.507 | 1.6 |
+| SFT `+` | 3 | 0.980 / 0.955 / 0.925 | 0.130 / 0.000 / 0.000 | 0.498 | 1.7 |
+| SFT `-` | 1 | 0.005 / 0.000 / 0.000 | 1.000 / 1.000 / 0.945 | 0.492 | 1.6 |
+| SFT `-` | 2 | 0.040 / 0.000 / 0.000 | 0.880 / 0.885 / 0.805 | 0.435 | 1.6 |
+| SFT `-` | 3 | 0.065 / 0.000 / 0.000 | 0.975 / 0.945 / 0.885 | 0.478 | 1.6 |
+| SFT+GRPO `+` | 0 (first set) | 1.000 / 1.000 / 0.995 | 0.205 / 0.000 / 0.000 | 0.533 | |
+| SFT+GRPO `+` | 1 | 1.000 / 0.985 / 0.950 | 0.205 / 0.015 / 0.000 | 0.526 | 8.9 + 1.7 |
+| SFT+GRPO `+` | 2 | 0.990 / 0.980 / 0.830 | 0.205 / 0.000 / 0.000 | 0.501 | 8.9 + 1.6 |
+| SFT+GRPO `+` | 3 | 0.955 / 0.925 / 0.925 | 0.205 / 0.000 / 0.000 | 0.502 | 7.8 + 1.7 |
+| SFT+GRPO `-` | 0 (first set) | 0.060 / 0.000 / 0.000 | 1.000 / 1.000 / 0.990 | 0.508 | |
+| SFT+GRPO `-` | 1 | 0.010 / 0.000 / 0.000 | 1.000 / 1.000 / 0.990 | 0.500 | 8.1 + 1.6 |
+| SFT+GRPO `-` | 2 | 0.080 / 0.000 / 0.000 | 1.000 / 1.000 / 0.975 | 0.509 | 8.4 + 1.6 |
+| SFT+GRPO `-` | 3 | 0.080 / 0.005 / 0.000 | 1.000 / 0.995 / 0.990 | 0.512 | 8.4 + 1.7 |
+
+Consolidation from the seed-`s` SFT+GRPO pair, student seed `s`:
+
+| arm | seed (expert = student) | `+` | `-` | avg | GPU min |
+|---|---|---|---|---|---|
+| tuned OPD (Muon 3e-4) | 0 (first set) | 0.830 / 0.400 / 0.050 | 0.590 / 0.295 / 0.010 | 0.362 | 7.9 |
+| tuned OPD (Muon 3e-4) | 1 | 0.880 / 0.275 / 0.025 | 0.635 / 0.175 / 0.005 | 0.332 | 5.8 |
+| tuned OPD (Muon 3e-4) | 2 | 0.710 / 0.250 / 0.035 | 0.775 / 0.275 / 0.005 | 0.342 | 4.9 |
+| tuned OPD (Muon 3e-4) | 3 | 0.720 / 0.330 / 0.035 | 0.690 / 0.285 / 0.015 | 0.346 | 5.0 |
+| RFT | 0 (first set) | 0.860 / 0.370 / 0.055 | 0.795 / 0.225 / 0.045 | 0.392 | 0.5 |
+| RFT | 1 | 0.890 / 0.245 / 0.035 | 0.685 / 0.195 / 0.015 | 0.344 | 0.4 |
+| RFT | 2 | 0.930 / 0.325 / 0.045 | 0.840 / 0.235 / 0.010 | 0.397 | 0.4 |
+| RFT | 3 | 0.935 / 0.300 / 0.035 | 0.825 / 0.215 / 0.020 | 0.388 | 0.4 |
+
+Ranges of avg: tuned OPD 0.332-0.362 (mean 0.346), RFT 0.344-0.397 (mean 0.380). GPU minutes are
+the consolidation step alone, on a shared card. OPD cost 12-16x RFT per run (seed 0: 15.8x). The
+5-6 min of OPD at seeds 1-3 against 7.9 at seed 0 is probably less contention on the card
+[INFERENCE]. The seed-0 rows are copied from the tables above, not rerun. The seed 1-3 experts
+differ from the first set (new training runs): the weakest are SFT `-` seed 2 (0.435) and
+SFT+GRPO `+` seed 2 (3-digit `+` 0.830), so the expert noise is real.
+
+Verdict (rule above): no measurable difference between RFT and tuned OPD at 4 seeds with expert
+and student noise both varying. The ranges overlap (0.344-0.397 against 0.332-0.362; overlap
+0.344-0.362), so the gap rule is not reached. Post hoc, not part of the rule: RFT's avg is above
+OPD's on every one of the 4 seeds (by 0.030, 0.012, 0.055, 0.042), and the gap of means is 0.035,
+below 0.05. The cost conclusion stands: the two arms tie within noise and RFT is 12-16x cheaper.
+This confirms the earlier tie (0.368-0.392 against 0.346-0.382) with teacher noise included; it
+does not show that RFT is better.
+
 ## Reproduce
 
 Logs: `runs/logs/merge/*.log` (training `.log`, wall seconds `.time`, `ev_*` = `reason-eval`).
@@ -311,3 +362,7 @@ minigpt reason-rft --base $B --sampler=+=$G --sampler=-=$H --ops +,- --lr 5e-5 -
   --out runs/rft_s0/ckpt.pt
 minigpt reason-eval --checkpoint runs/merge/ckpt.pt --ops + --n 200   # and --ops -
 ```
+
+Expert-seed follow-up: the same, with `--seed $s` in all four expert commands and in `opd` /
+`reason-rft`, `s` in 1 2 3 (logs in `runs/logs/merge-expert-seeds/`, not committed), plus
+`--optimizer muon` for `opd`.
