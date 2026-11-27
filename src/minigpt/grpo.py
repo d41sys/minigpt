@@ -172,6 +172,29 @@ def grpo_loss(
     return loss, ((kl * mask).sum() / mask.sum().clamp(min=1)).detach()
 
 
+def clip_fraction(
+    logps: torch.Tensor,
+    old_logps: torch.Tensor,
+    mask: torch.Tensor,
+    clip_eps: float = 0.2,
+    clip_eps_high: float | None = None,
+    policy_loss: str = "ppo",
+) -> float:
+    """Share of completion tokens whose importance ratio is outside `[1 - clip_eps, 1 + high]`.
+
+    For `cispo` that is the share whose weight is capped (the lower bound is 0 with
+    `clip_eps=1`, so only ratio > 1 + high counts). For `gspo` the sequence ratio is tested and
+    counted once per token of the sequence.
+    """
+    log_r = logps - old_logps
+    if policy_loss == "gspo":
+        log_r = ((log_r * mask).sum(1) / mask.sum(1).clamp(min=1)).unsqueeze(1)
+    ratio = torch.exp(log_r)
+    high = clip_eps if clip_eps_high is None else clip_eps_high
+    hit = ((ratio > 1 + high) | (ratio < 1 - clip_eps)) & mask
+    return (hit.sum() / mask.sum().clamp(min=1)).item()
+
+
 def grpo_step(
     policy: GPTModel,
     ref: GPTModel,
@@ -190,8 +213,9 @@ def grpo_step(
     policy_loss: str = "ppo",
     clip_eps_high: float | None = None,
     advantage: str = "group",
-) -> float:
-    """`mu` optimizer steps on one batch; returns the mean KL to the reference of the last one.
+) -> tuple[float, float]:
+    """`mu` optimizer steps on one batch; returns `(kl, clip)`: the mean KL to the reference of
+    the last step and the `clip_fraction` averaged over the `mu` steps (0 at the first, ratio 1).
 
     `prompts` and `completions` are flat, group-major; `rewards` is `(groups, G)`. The old
     log-probs are taken before the first inner step, so the ratio starts at exactly 1.
@@ -204,9 +228,13 @@ def grpo_step(
     with torch.no_grad():
         old_logps, _ = per_token_log_probs(policy, x, y)
         ref_logps, _ = per_token_log_probs(ref, x, y)
-    kl = 0.0
+    kl = clip = 0.0
     for _ in range(mu):
         logps, mask = per_token_log_probs(policy, x, y)
+        clip += (
+            clip_fraction(logps.detach(), old_logps, mask, clip_eps, clip_eps_high, policy_loss)
+            / mu
+        )
         loss, kl_mean = grpo_loss(
             logps,
             old_logps,
@@ -227,7 +255,7 @@ def grpo_step(
         torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
         optimizer.step()
         kl = kl_mean.item()
-    return kl
+    return kl, clip
 
 
 def train_grpo(
@@ -268,7 +296,8 @@ def train_grpo(
 
     Per step the record holds `reward` (mean of `reward_fn`), `accuracy` (mean of the true
     `accuracy_reward`, whatever `reward_fn` is), `format`, `length` (mean completion tokens),
-    `kl` (0 on a skipped step) and `drop_rate` (share of sampled groups dropped as all-equal).
+    `kl` and `clip` (the `grpo_step` outputs, 0 on a skipped step) and `drop_rate` (share of
+    sampled groups dropped as all-equal).
     With `fill_batch`, up to `max_rounds` rounds of `tasks_per_step` tasks are sampled until
     `tasks_per_step` groups survive; `tasks_sampled` counts them. Stats cover
     every sample, dropped groups included. `observe` sees all `(task, completion)` pairs of the
@@ -339,9 +368,9 @@ def train_grpo(
             if len(kept) >= tasks_per_step * len(levels):
                 break
         kept = kept[: tasks_per_step * len(levels)]
-        kl = 0.0
+        kl = clip = 0.0
         if kept:
-            kl = grpo_step(
+            kl, clip = grpo_step(
                 policy,
                 ref,
                 optimizer,
@@ -369,6 +398,7 @@ def train_grpo(
             "format": sum(format_reward(s) for _, s in samples) / n,
             "length": sum(len(c) for g in groups for c in g) / n,
             "kl": kl,
+            "clip": clip,
             "drop_rate": 1 - spread.float().mean().item(),
             "tasks_sampled": float(len(entries) // len(levels)),
         }

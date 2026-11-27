@@ -147,6 +147,75 @@ All cells keep `--beta 0.04`, so KL is on; same base, 200 steps, same rule.
 
 `$B` is defined in the Reproduce block below. Logs: `runs/logs/kl_*.log`, `runs/logs/ri*_*.log`.
 
+### CISPO's `eps_high`
+
+The CISPO cell above uses `--clip-eps-high 0.28`, which is DAPO's Clip-Higher value, not a CISPO
+one. MiniMax-M1 (section 3.1) gives no value and used about 16 updates per batch; ScaleRL
+([arXiv 2510.13786](https://arxiv.org/abs/2510.13786) appendix A.17.2) caps the weight as
+`min(rho, eps_max)` with no lower bound and finds CISPO largely insensitive to `eps_max` over a
+wide range. A small-scale study ([arXiv 2603.19335](https://arxiv.org/abs/2603.19335)) saw CISPO
+collapse with a 73-85% clip fraction. This sweep asks whether our "CISPO loses" is a too-tight cap.
+
+- Cells: the published CISPO cell (`--beta 0 --fill-batch`, `mu 4`, base and eval unchanged) with
+  `--clip-eps-high` in 1.0, 3.0, 7.0, i.e. weight caps 2, 4, 8 (0.28 is cap 1.28). Seeds 0 to 3.
+- New log field `clip` (per step, in the `grpo` log line and `history.json`): the share of
+  completion tokens whose importance ratio is outside `[1 - clip_eps, 1 + clip_eps_high]`
+  (for CISPO `clip_eps = 1.0`, so: capped, ratio above `1 + clip_eps_high`), averaged over the
+  `mu` inner steps. The first inner step has ratio 1, so with `mu 4` the value is at most 0.75.
+  Per run below: the mean over the 200 steps.
+- Verdict rule, fixed before any run: the one above. A cap "beats" or "loses to" a baseline in a
+  column only if no seed value overlaps (ties count as overlap) and the seed-mean gap is above
+  0.07. Each cap is compared with (a) CISPO 0.28 and (b) GRPO `mu 4`. The published 0.28 numbers
+  are reused only if this branch reproduces seed 0 line for line (apart from the `clip` field);
+  otherwise 0.28 is rerun.
+
+Results (greedy accuracy on the fixed eval tasks, n = 50 per digit count, final-step model;
+base 0.68 / 0.62 / 0.30). The 0.28 row is the published cell: a rerun of seed 0 on this branch
+matched `runs/logs/rl_cispo.log` line for line apart from the new `clip` field, so seeds 0 to 3
+are reused. `clip` is the mean over the logged steps (every 10th, 20 per run), averaged over
+seeds; for 0.28 only seed 0 was rerun with the field. The largest logged value in any run is
+0.002.
+
+| Cell (weight cap) | Mean 1 / 2 / 3 digits | 3-digit, seeds 0 / 1 / 2 / 3 | `clip` | vs CISPO 0.28 (1 / 2 / 3 digits) | vs GRPO `mu 4` (1 / 2 / 3 digits) |
+|---|---|---|---|---|---|
+| GRPO `mu 4` (baseline) | 0.98 / 0.88 / 0.57 | 0.68 / 0.60 / 0.50 / 0.50 | not logged | n/a | n/a |
+| CISPO 0.28 (cap 1.28) | 0.78 / 0.51 / 0.19 | 0.34 / 0.10 / 0.16 / 0.16 | 0.003 (seed 0) | n/a | none / loses / loses |
+| CISPO 1.0 (cap 2) | 0.91 / 0.55 / 0.23 | 0.32 / 0.22 / 0.14 / 0.24 | 0.0004 | none / none / none | none / loses / loses |
+| CISPO 3.0 (cap 4) | 0.79 / 0.53 / 0.14 | 0.20 / 0.10 / 0.20 / 0.06 | 0.00001 | none / none / none | loses / loses / loses |
+| CISPO 7.0 (cap 8) | 0.85 / 0.73 / 0.31 | 0.42 / 0.22 / 0.26 / 0.34 | 0 | none / none / none | none / none / loses |
+
+Per-seed 1- and 2-digit values of the new cells: 1.0: 0.98 / 0.88 / 0.86 / 0.90 and 0.62 / 0.54 /
+0.60 / 0.44; 3.0: 0.88 / 0.78 / 0.80 / 0.70 and 0.72 / 0.34 / 0.52 / 0.52; 7.0: 1.00 / 0.72 /
+0.78 / 0.88 and 0.90 / 0.62 / 0.70 / 0.68. Per-run `clip` of 1.0: 0.0003 / 0.0006 / 0.0002 /
+0.0004; 3.0: 0 / 0 / 0 / 0.00005; 7.0: 0 in all four.
+
+- The cap is not what makes CISPO lose: at 0.28 the clip fires on 0.3% of tokens (seed 0), and
+  at caps 2, 4 and 8 on at most 0.06%. The 73-85% clip fraction of the small-scale study
+  (arXiv 2603.19335) is far from this setup. [INFERENCE] With lr 5e-5 and 4 inner steps the
+  ratios stay close to 1, so every cap here is nearly never reached and CISPO reduces to a
+  token-mean policy gradient weighted by the ratio.
+- No cap differs measurably from 0.28. Cap 8 is the best CISPO cell (3 digits 0.31 vs 0.19, gap
+  +0.12) but its seeds overlap 0.28's (0.22-0.42 vs 0.10-0.34), so a trend with the cap is
+  possible but not shown at 4 seeds.
+- CISPO still loses to GRPO `mu 4` at 3 digits at every cap, and at 2 digits at caps 2 and 4.
+  At cap 8 it is not measurably different at 1 and 2 digits (2 digits: 0.62-0.90 vs 0.86-0.92,
+  gap -0.15 but overlapping). So "CISPO loses" holds at 3 digits for every `eps_high` tried; the
+  2-digit part of the original verdict is not robust to the cap.
+- Cell mean KL (steps 10-190) of cap 1.0 seed 0 is 13.4 from a single logged spike (253.8 at
+  step 160); the other runs are 0.07-0.25 and are not tabulated.
+- Not measured: `clip` for 0.28 seeds 1 to 3 (the published runs predate the field), and `clip`
+  for the PPO and GRPO baselines.
+
+```bash
+B="--base runs/reason_sft_n10000e3/ckpt.pt --steps 200 --seed 0"  # seeds 1 to 3: --seed N
+for E in 1.0 3.0 7.0; do
+  minigpt grpo $B --mu 4 --policy-loss cispo --loss-agg token-mean --clip-eps 1.0 \
+    --clip-eps-high $E --beta 0 --fill-batch --out runs/cispo_e${E}_s0/ckpt.pt
+done
+```
+
+Logs: `runs/logs/cispo_e*_s*.log`.
+
 Reproduce (from the repo root, base checkpoint in `runs/`):
 
 ```bash
