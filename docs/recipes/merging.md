@@ -134,11 +134,11 @@ little to the distance from the base (the norm of GRPO minus SFT was not measure
 1. Merge vs OPD: measurable, and the merge is worse. 0.020-0.025 lies 0.14 below the OPD range
    (0.166-0.206), and below the base (0.155). The 2026 claim that merging matches MOPD at a
    fraction of the cost does not hold in this setup: the merge costs nothing and gives nothing.
-2. RFT vs OPD: measurable, RFT is better. Ranges 0.368-0.392 against 0.166-0.206, gap 0.16, at
-   about 1/14 of the GPU time (0.8-0.9 against 11.8-12.7 min). Not a clean comparison: RFT got a
-   validation-tuned lr (from two values; the other scored 0.361 on validation against 0.436) and
-   OPD kept the untuned E1 settings, and RFT trains on about 2,000 verified samples for 2 epochs
-   against OPD's 4,000 student rollouts.
+2. RFT vs OPD: against untuned OPD, measurable, RFT better (0.368-0.392 against 0.166-0.206,
+   gap 0.16, about 1/14 of the GPU time). Against OPD tuned like RFT (two points each on
+   validation, Muon 3e-4 won), no measurable difference: 0.368-0.392 against 0.346-0.382
+   (follow-up below). RFT stays 8-15x cheaper per run. RFT also trains on about 2,000 verified
+   samples for 2 epochs against OPD's 4,000 student rollouts.
 3. OPD vs base: no measurable lift in avg (range 0.166-0.206, base 0.155; nearest gap 0.011). OPD
    raised 1-digit `+` and `-` on most seeds and left 2-3 digits at the base level.
 4. Merge with SFT+GRPO experts vs with SFT experts: no measurable difference (0.025 vs 0.020, one
@@ -150,7 +150,7 @@ Why the merge fails [INFERENCE]: one expert alone at half scale still works (0.7
 deltas that are each a third of the base's weight norm breaks the model at L >= 0.25, and L = 0.1
 is just the base again. The base is a weakly trained model, not a pretrained one, and 3,750
 SFT steps at lr 5e-4 moved it far; task arithmetic is reported to work for small fine-tunes of
-a converged base. A merge of lighter experts (fewer SFT steps, lower lr) was not run.
+a converged base. Merging lighter experts (below) fails too, so that explanation is not enough.
 
 ## Limits
 
@@ -162,8 +162,9 @@ a converged base. A merge of lighter experts (fewer SFT steps, lower lr) was not
 - 1-digit validation groups are tiny (15 and 2 tasks).
 - One base, one task family, 842k parameters; the SFT experts are near the ceiling on their own
   op, so GRPO has little to add on top of them (and little forgetting difference to show).
-- Wall times come from a shared GPU (the same GRPO job varied 2x). GPU-minute ratios between OPD
-  and RFT (about 14x) are large enough to survive that; the merge's GPU cost is the L sweep only.
+- Wall times come from a shared GPU (the same GRPO job varied 2x; the same RFT run took 29-52 s).
+  GPU-minute ratios between OPD and RFT (about 8-15x) are large enough to survive that; the
+  merge's GPU cost is the L sweep only.
 
 ## Follow-up: light experts (predeclared before running)
 
@@ -180,7 +181,51 @@ kept, ties to the smaller) and scored on the test tasks as before. Rule: the mer
 digits keeps at least half of the single expert's gain over the base on that operator. One seed, so
 no seed range; every number is one run.
 
-(results are added below after the run)
+### Light-expert results
+
+| model | `+` | `-` | avg | delta / base norm | gain on own op | forgetting (other op) | GPU s |
+|---|---|---|---|---|---|---|---|
+| base | 0.300 / 0.110 / 0.010 | 0.420 / 0.080 / 0.010 | 0.155 | | | | |
+| `short` `+` | 0.835 / 0.500 / 0.090 | 0.175 / 0.000 / 0.000 | 0.267 | 0.118 | +0.335 | 0.112 | 20 |
+| `short` `-` | 0.130 / 0.000 / 0.000 | 0.965 / 0.630 / 0.090 | 0.302 | 0.129 | +0.392 | 0.097 | 18 |
+| `lowlr` `+` | 1.000 / 0.995 / 0.780 | 0.070 / 0.005 / 0.000 | 0.475 | 0.144 | +0.785 | 0.145 | 156 |
+| `lowlr` `-` | 0.040 / 0.000 / 0.000 | 1.000 / 0.985 / 0.770 | 0.466 | 0.140 | +0.748 | 0.127 | 154 |
+
+Gain = mean over 1-3 digits on the expert's own op minus the base's (0.140 for `+`, 0.170 for
+`-`). The deltas are less than half the first experts' size (0.34-0.35), yet still 12-14%
+of the base norm. Forgetting is as large as before.
+
+Merges (test scores; chosen L marked; the validation set picked 0.5 both times):
+
+| experts | L | `+` | `-` | avg | validation mean |
+|---|---|---|---|---|---|
+| `short` | 0.5 (chosen) | 0.005 / 0.005 / 0.000 | 0.065 / 0.015 / 0.000 | 0.015 | 0.007 |
+| `short` | 0.75 | 0.005 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | 0.001 | 0.001 |
+| `short` | 1.0 | 0.000 / 0.000 / 0.000 | 0.080 / 0.005 / 0.000 | 0.014 | 0.001 |
+| `short` | 1.25 | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | 0.000 | 0.000 |
+| `lowlr` | 0.5 (chosen) | 0.015 / 0.000 / 0.000 | 0.070 / 0.010 / 0.000 | 0.016 | 0.089 |
+| `lowlr` | 0.75 | 0.000 / 0.000 / 0.000 | 0.035 / 0.005 / 0.000 | 0.007 | 0.000 |
+| `lowlr` | 1.0 | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | 0.000 | 0.000 |
+| `lowlr` | 1.25 | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | 0.000 | 0.000 |
+
+Verdict: the merge does not work for either kind. (a) avg 0.015 and 0.016 against the required
+more than 0.205 (base 0.155 + 0.05); (b) on `+` the merged model scores -0.135 against the base
+(needs at least half of +0.335 / +0.785) and on `-` -0.143 (needs half of +0.392 / +0.748).
+The `lowlr` validation mean of 0.089 at L = 0.5 is carried by the `-` score (0.178), a mean over
+three groups one of which has 2 tasks [INFERENCE: it is probably that group]. Merging does not
+rescue even a delta of 12-14% of the base's norm here.
+
+Post hoc (smaller L than the predeclared grid; not used for any choice):
+
+| experts | L | `+` | `-` | avg | gain over base `+` / `-` |
+|---|---|---|---|---|---|
+| `short` | 0.1 | 0.425 / 0.135 / 0.000 | 0.475 / 0.070 / 0.005 | 0.185 | +0.047 / +0.013 |
+| `short` | 0.25 | 0.340 / 0.010 / 0.000 | 0.320 / 0.035 / 0.005 | 0.118 | -0.023 / -0.050 |
+| `lowlr` | 0.1 | 0.490 / 0.140 / 0.000 | 0.450 / 0.080 / 0.015 | 0.196 | +0.070 / +0.012 |
+| `lowlr` | 0.25 | 0.210 / 0.000 / 0.000 | 0.140 / 0.025 / 0.005 | 0.063 | -0.070 / -0.113 |
+
+Even the best of these (0.196) is below the 0.205 bar, and the gains are a few percent of the
+single experts' (+0.785 / +0.748 for `lowlr`): small L only stays near the base.
 
 ## Follow-up: OPD with RFT's tuning budget (predeclared before running)
 
@@ -192,7 +237,40 @@ then runs on seeds 1-3, seed 0 being the probe, and is scored on test. The compa
 the same rule as above (seed ranges apart by more than 0.05). The SFT+GRPO experts were deleted
 after the first run, so this follow-up retrains them (`sft2_*`, `grpo2_*`, same commands and seed;
 their scores are reported next to the first set's, since GPU runs need not repeat bit for bit).
-Until this runs, the RFT claim above is only "beats untuned OPD".
+Until this ran, the RFT claim above was only "beats untuned OPD".
+
+### OPD tuning results
+
+Retrained experts: `grpo2_plus` and `grpo2_minus` scored exactly like the first pair on every
+cell (1.000 / 1.000 / 0.995 and 0.205 / 0.000 / 0.000 for `+`; 0.060 / 0.000 / 0.000 and
+1.000 / 1.000 / 0.990 for `-`), and the RFT control below reproduced the first RFT arm cell for
+cell, so the two sets of experts are in effect the same.
+
+Validation (seed 0 probes, mean validation accuracy): AdamW `--lr 1e-4` 0.368 (`+` 0.303, `-`
+0.432), Muon `--lr 3e-4` 0.451 (`+` 0.433, `-` 0.468). Muon wins and runs seeds 1-3.
+
+| arm | seed | `+` | `-` | avg | GPU min |
+|---|---|---|---|---|---|
+| OPD, default (first table) | 0-3 | | | 0.206 / 0.192 / 0.201 / 0.166 | 11.8-12.7 |
+| OPD, Muon 3e-4 | 0 | 0.830 / 0.400 / 0.050 | 0.590 / 0.295 / 0.010 | 0.362 | 7.9 |
+| OPD, Muon 3e-4 | 1 | 0.785 / 0.270 / 0.020 | 0.760 / 0.220 / 0.020 | 0.346 | 7.0 |
+| OPD, Muon 3e-4 | 2 | 0.870 / 0.300 / 0.015 | 0.815 / 0.265 / 0.005 | 0.378 | 6.5 |
+| OPD, Muon 3e-4 | 3 | 0.765 / 0.395 / 0.055 | 0.780 / 0.270 / 0.025 | 0.382 | 6.6 |
+| RFT, retrained teachers | 0 | 0.860 / 0.370 / 0.055 | 0.795 / 0.225 / 0.045 | 0.392 | 0.5 |
+| RFT, retrained teachers | 1 | 0.930 / 0.275 / 0.075 | 0.690 / 0.240 / 0.000 | 0.368 | 0.5 |
+| RFT, retrained teachers | 2 | 0.945 / 0.290 / 0.050 | 0.810 / 0.205 / 0.015 | 0.386 | 0.5 |
+| RFT, retrained teachers | 3 | 0.915 / 0.320 / 0.060 | 0.770 / 0.195 / 0.015 | 0.379 | 0.5 |
+
+Ranges of avg: tuned OPD 0.346-0.382 (mean 0.367), RFT 0.368-0.392 (mean 0.381). The tuning
+probe that lost took 12.2 GPU min, so the whole tuned OPD arm cost about 40 GPU min against about
+4 for RFT's two probes and four runs. Wall times are on the shared GPU (the same untuned OPD
+config took 11.8-12.7 min, Muon 6.5-7.9 min).
+
+Verdicts: (1) tuned OPD beats untuned OPD, measurably (0.346-0.382 against 0.166-0.206, gap
+0.14), so the first RFT-vs-OPD comparison overstated RFT's lead. (2) RFT vs tuned OPD:
+no measurable difference (ranges overlap: 0.368-0.392 against 0.346-0.382). RFT is cheaper per
+run by about 8-15x. Both arms had two tuning points on seed-0 validation tasks, but the 1-digit
+validation groups have 15 and 2 tasks.
 
 ## Reproduce
 
@@ -209,6 +287,7 @@ PYTHONPATH=src python docs/recipes/merge_val.py --base $B --expert $G --expert $
 minigpt merge --base $B --expert $G --expert $H --scale 0.5 --out runs/merge/ckpt.pt
 minigpt opd --teacher=+=$G --teacher=-=$H --student $B --ops +,- --eval-every 100 \
   --eval-tasks 200 --steps 500 --seed 0 --out runs/opd_s0/ckpt.pt
+# tuned OPD (follow-up, chosen on validation): add --optimizer muon (lr stays 3e-4)
 minigpt reason-rft --base $B --sampler=+=$G --sampler=-=$H --ops +,- --lr 5e-5 --seed 0 \
   --out runs/rft_s0/ckpt.pt
 minigpt reason-eval --checkpoint runs/merge/ckpt.pt --ops + --n 200   # and --ops -
