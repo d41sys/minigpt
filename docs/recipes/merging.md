@@ -165,6 +165,23 @@ a converged base. A merge of lighter experts (fewer SFT steps, lower lr) was not
 - Wall times come from a shared GPU (the same GRPO job varied 2x). GPU-minute ratios between OPD
   and RFT (about 14x) are large enough to survive that; the merge's GPU cost is the L sweep only.
 
+## Follow-up: light experts (predeclared before running)
+
+The merge above failed with deltas 0.34 of the base norm. Follow-up on the same base, GPU 1:
+two kinds of light SFT-only expert per operator (seed 0), each a much smaller move from the base:
+
+- `short`: `reason-sft --ops OP --n 2000` (1/10 of the steps, lr 5e-4 as before).
+- `lowlr`: `reason-sft --ops OP --lr 5e-5` (full 20,000 traces, 3 epochs, lr/10).
+
+Reported per expert: both operators' scores, forgetting, and delta norm / base norm. Each kind
+is merged (both ops, `L` swept over {0.5, 0.75, 1.0, 1.25} on the same validation tasks, the best
+kept, ties to the smaller) and scored on the test tasks as before. Rule: the merge "works" if
+(a) its avg beats the base's 0.155 by more than 0.05, and (b) on each operator its mean over 1-3
+digits keeps at least half of the single expert's gain over the base on that operator. One seed, so
+no seed range; every number is one run.
+
+(results are added below after the run)
+
 ## Reproduce
 
 Logs: `runs/logs/merge/*.log` (training `.log`, wall seconds `.time`, `ev_*` = `reason-eval`).
