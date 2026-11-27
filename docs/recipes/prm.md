@@ -161,3 +161,44 @@ minigpt grpo --base $P --seed $s --out runs/grpo_outcome_s$s/ckpt.pt
 minigpt grpo --base $P --seed $s --prm runs/prm_s0/prm.pt --out runs/grpo_prm_s$s/ckpt.pt
 minigpt reason-eval --checkpoint runs/grpo_<arm>_s$s/ckpt.pt --n 200
 ```
+
+Result (greedy accuracy, 200 tasks per digit count, final step; logs `grpo_*_s*.log`,
+`eval_*_s*.log`). The starting policy scores 0.760 / 0.375 on 2 / 3 digits; 1 digit is 1.000
+for every run below.
+
+| arm | seed | 2 digits | 3 digits |
+|---|---|---|---|
+| outcome | 0 / 1 / 2 / 3 | 0.950 / 0.955 / 0.970 / 0.875 | 0.820 / 0.825 / 0.830 / 0.785 |
+| PRM-shaped | 0 / 1 / 2 / 3 | 0.940 / 0.965 / 0.955 / 0.925 | 0.835 / 0.835 / 0.825 / 0.885 |
+
+3 digits: outcome 0.785-0.830 (mean 0.815), PRM-shaped 0.825-0.885 (mean 0.845), gap +0.030,
+ranges overlap: **not measurable**; 2 digits likewise (means 0.938 and 0.946). Both rewards
+lift the 3-digit greedy accuracy by about 0.45. No sign of the PRM being exploited in 200
+steps: the sampled training accuracy at step 190 of the PRM arm is level with the outcome
+arm's (0.828 / 0.797 / 0.609 / 0.781 against 0.859 / 0.875 / 0.672 / 0.781; one step each,
+noisy). That says nothing about longer runs, where the DeepSeek-R1 report argues a model-based
+PRM will be exploited (appendix G.2).
+
+## Limits
+
+- One policy, one task family (digit addition), one tokenizer in which a character is a token.
+  Step labels come from a program and are exact: no annotator noise, no neutral labels, and
+  one valid trace per task, so "equals the reference step" is the whole definition of right.
+  The paper's PRM800K labels are human; this is the free-label corner of its design space.
+- Verifiers are the 1M-parameter policy body plus a head, trained on 12000 samples (3000 tasks)
+  for a fixed 8 epochs, still improving at the pilot's 6. The ORM is therefore a small-data ORM
+  (the paper's large ORM sees 100 samples per problem and ends slightly above majority vote);
+  its below-`random` result at N=16 is a result about this ORM, not about ORMs in general.
+- Seed ranges cover verifier training only. The 600 held-out tasks and their 16 samples are
+  one fixed draw, so the table has no task-sampling variance: each cell has a binomial standard
+  error of about 0.03, and `majority` is one number, not a range.
+- The policy's 3-digit pass@1 on the held-out tasks is 0.175, just under the 0.2-0.6 target
+  band; 3-digit majority vote and PRM selection are therefore both limited by few right samples
+  (pass@16 is 0.80).
+- 1-digit tasks (and some 2-digit ones) also occur in the verifiers' training tasks, so those
+  columns are not fully held out; the primary 3-digit cell is.
+- `prm_min` and `prm_prod` were not separable here (every seed within 0.03 of each other
+  at 3 digits, N=16); the claims use `prm_min` as pre-registered.
+- A PRM and an ORM differ in the number of labeled positions per sample (1-4 against 1) as
+  well as in what the label says. The paper separates the two with an ORM supervised by a
+  large PRM (sec. 4.1); that arm was not run here.
