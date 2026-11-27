@@ -75,6 +75,7 @@ from minigpt.grpo import (
     make_shaper,
     train_grpo,
 )
+from minigpt.guard import build_evals, format_runs, run_seed, train_policy
 from minigpt.lora import apply_lora, merge_lora
 from minigpt.merge import task_arithmetic
 from minigpt.model import GPTConfig, GPTModel, MoEFeedForward, count_parameters
@@ -1195,6 +1196,28 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     print(f"checkpoint -> {args.out}")
 
 
+def cmd_guard(args: argparse.Namespace) -> None:
+    """Train the input, output, probe and cascade guards for each seed and compare them."""
+    device = get_device()
+    tok = reasoning_tokenizer()
+    path = Path(args.policy)
+    if path.exists():
+        policy = load_model(path)
+    else:
+        policy = train_policy(args.policy_n, args.policy_epochs, 0, device)
+        save_checkpoint(path, policy, None, step=args.policy_epochs, val_loss=0.0)
+    policy.to(device)
+    evals = build_evals(policy, tok, args.eval_n)
+    for name, b in evals.items():
+        print(f"policy accuracy on {name}: {sum(b.correct) / len(b.correct):.3f}")
+    seeds = [int(x) for x in args.seeds.split(",")]
+    runs = [run_seed(s, policy, tok, evals, args.n_train, args.epochs, device) for s in seeds]
+    print(format_runs(seeds, runs))
+    print(f"cascade escalated share per set, seed {seeds[0]}:", runs[0]["escalated"])
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(json.dumps({"seeds": seeds, "runs": runs}, indent=1))
+
+
 def cmd_reason_eval(args: argparse.Namespace) -> None:
     device = get_device()
     model = load_model(require(Path(args.checkpoint), "reason-sft")).to(device)
@@ -1889,6 +1912,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")
     add_grpo_args(s, HACK_CKPT)
     s.set_defaults(func=cmd_hack_demo)
+
+    s = sub.add_parser("guard", help="constitutional classifiers: input/output/probe/cascade")
+    s.add_argument("--policy", default="runs/guard_policy/ckpt.pt", help="trained here if missing")
+    s.add_argument("--policy-n", type=int, default=40000, help="policy SFT traces")
+    s.add_argument("--policy-epochs", type=int, default=6)
+    s.add_argument("--seeds", default="0,1,2,3", help="classifier and probe seeds")
+    s.add_argument("--n-train", type=int, default=4000, help="guard training exchanges per seed")
+    s.add_argument("--epochs", type=int, default=8, help="classifier epochs")
+    s.add_argument("--eval-n", type=int, default=200, help="exchanges per held-out set")
+    s.add_argument("--out", default="runs/guard/results.json")
+    s.set_defaults(func=cmd_guard)
 
     s = sub.add_parser("reason-rft", help="rejection-sampling fine-tuning / expert iteration")
     s.add_argument("--base", default=str(REASON_SFT_CKPT), help="the model that is fine-tuned")
