@@ -86,6 +86,7 @@ from minigpt.prm import (
     build_example,
     cached_samples,
     draw_eval_tasks,
+    prm_shaped_reward,
     score_samples,
     train_verifier,
 )
@@ -1322,7 +1323,11 @@ def run_grpo(
 
 
 def cmd_grpo(args: argparse.Namespace) -> None:
-    run_grpo(args, default_reward, None)
+    reward_fn = default_reward
+    if args.prm:
+        prm = load_reward_model(require(Path(args.prm), "prm")).to(get_device()).eval()
+        reward_fn = prm_shaped_reward(default_reward, prm, reasoning_tokenizer(), args.prm_weight)
+    run_grpo(args, reward_fn, None)
 
 
 def cmd_hack_demo(args: argparse.Namespace) -> None:
@@ -1961,6 +1966,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("grpo", help="GRPO on verifiable addition from the reasoning SFT model")
     add_grpo_args(s, GRPO_CKPT)
+    s.add_argument("--prm", default=None, help="add --prm-weight x P(every step right) to reward")
+    s.add_argument("--prm-weight", type=float, default=1.0)
     s.set_defaults(func=cmd_grpo)
 
     s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")

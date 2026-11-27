@@ -79,3 +79,22 @@ done
 
 `tests/test_minigpt_prm.py` covers the step labels, token positions, selectors, both
 verifiers' training and the sample cache.
+
+## Extra: GRPO with a PRM-shaped reward (not part of the two claims)
+
+`minigpt grpo --prm CKPT --prm-weight W` adds `W * P(every step right)` (the PRM's step
+probabilities multiplied, 0 for a malformed completion) to the usual reward (accuracy +
+0.1 format). Pre-registered before it ran: same policy as above, default GRPO settings (200
+steps, 8 tasks x 8 completions, lr 5e-5), seeds 0-3 for both arms, `--prm-weight 1`, the PRM
+of verifier seed 0 for all four PRM-arm runs (so the PRM arm differs from the outcome arm only
+by the reward; the PRM is frozen and was trained on the starting policy's samples, so it can
+drift off distribution as the policy moves). Metric: final-step greedy accuracy on 200 fixed
+tasks per digit count (`reason-eval --n 200`), primary cell 3 digits. Same verdict rule: a
+difference is measurable only if the two arms' 4-seed ranges do not overlap and the gap of
+means is > 0.05. One PRM, so the PRM-arm seeds do not cover verifier variance.
+
+```bash
+minigpt grpo --base $P --seed $s --out runs/grpo_outcome_s$s/ckpt.pt
+minigpt grpo --base $P --seed $s --prm runs/prm_s0/prm.pt --out runs/grpo_prm_s$s/ckpt.pt
+minigpt reason-eval --checkpoint runs/grpo_<arm>_s$s/ckpt.pt --n 200
+```

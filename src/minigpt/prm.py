@@ -280,3 +280,26 @@ def cached_samples(
 def draw_eval_tasks(rng: random.Random, n_per_digit: int, max_digits: int) -> list[Task]:
     """`n_per_digit` tasks for each digit count 1..`max_digits`."""
     return [make_task(rng, d) for d in range(1, max_digits + 1) for _ in range(n_per_digit)]
+
+
+def prm_shaped_reward(
+    base: Callable[[Task, str], float],
+    prm: GPTForClassification,
+    tok: BPETokenizer,
+    weight: float,
+) -> Callable[[Task, str], float]:
+    """`base` plus `weight` times the PRM's probability that every step is right (no bonus if
+    the completion is malformed)."""
+    device = next(prm.parameters()).device
+
+    @torch.no_grad()
+    def reward(task: Task, completion: str) -> float:
+        steps = parse_steps(completion)
+        if steps is None:
+            return base(task, completion)
+        prompt = tok.encode(task.prompt)
+        idx = torch.tensor([[*prompt, *tok.encode(completion), tok.eos_token_id]], device=device)
+        (logits,) = step_logits(prm, idx, [[len(prompt) + e for e, _ in steps]])
+        return base(task, completion) + weight * F.logsigmoid(logits).sum().exp().item()
+
+    return reward

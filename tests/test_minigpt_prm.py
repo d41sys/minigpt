@@ -11,6 +11,7 @@ from minigpt.prm import (
     cached_samples,
     majority_index,
     parse_steps,
+    prm_shaped_reward,
     score_samples,
     step_labels,
     train_verifier,
@@ -128,3 +129,14 @@ def test_cached_samples_are_reused_and_checked(tmp_path: Path) -> None:
     assert [s.texts for s in first] == [s.texts for s in again]
     with pytest.raises(ValueError, match="another k"):
         cached_samples(path, model, tok, tasks, 4, 8, 1.0)
+
+
+def test_prm_shaped_reward_adds_a_probability_for_well_formed_completions() -> None:
+    tok = reasoning_tokenizer()
+    torch.manual_seed(0)
+    rm = new_reward_model(GPTModel(TINY), tok.special_to_id["<|pad|>"])
+    reward = prm_shaped_reward(lambda _t, _c: 1.0, rm, tok, 2.0)
+    assert reward(TASK, MALFORMED) == 1.0
+    scores = score_samples(rm, rm, tok, [sampled([GOOD])], torch.device("cpu"))
+    p = math.exp(scores["prm_prod"][0][0])
+    assert reward(TASK, GOOD) == pytest.approx(1.0 + 2.0 * p, rel=1e-4)
