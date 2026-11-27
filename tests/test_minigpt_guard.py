@@ -3,6 +3,7 @@ import random
 import torch
 
 from minigpt.guard import (
+    ATTACKS,
     EVAL_SETS,
     GUARDS,
     LIMIT,
@@ -12,6 +13,7 @@ from minigpt.guard import (
     Example,
     build_evals,
     cascade,
+    control_verdict,
     fit_probe,
     format_runs,
     make_examples,
@@ -79,6 +81,20 @@ def test_pipeline_runs_end_to_end_on_a_tiny_policy() -> None:
     # the probe costs a small fraction of the output classifier; the cascade never exceeds both
     for name in EVAL_SETS:
         f = {g: res["flops"][g][name] for g in GUARDS}
-        assert f["probe"] < 0.1 * f["output"]
+        assert f["probe"] < 0.1 * f["output"] and f["probe"] < 0.1 * f["output_init"]
         assert f["probe"] <= f["cascade"] <= f["probe"] + f["output"] + 1e-6
     assert "probe" in format_runs([0], [res])
+
+
+def test_control_verdict_uses_the_repo_rule() -> None:
+    def run(probe_asr: float, init_asr: float) -> dict[str, dict[str, dict[str, float]]]:
+        rate = {"probe": {s: 1 - probe_asr for s in ATTACKS}, "input_init": {}}
+        rate["input_init"] = {s: 1 - init_asr for s in ATTACKS}
+        return {"rate": rate}
+
+    far = [run(0.08 + 0.005 * i, 0.30 + 0.01 * i) for i in range(4)]
+    assert "MEASURABLE" in control_verdict(far, "input_init")
+    near = [run(0.08 + 0.005 * i, 0.10 + 0.01 * i) for i in range(4)]
+    assert "no measurable difference" in control_verdict(near, "input_init")
+    overlap = [run(0.08 + 0.1 * i, 0.30 + 0.01 * i) for i in range(4)]
+    assert "no measurable difference" in control_verdict(overlap, "input_init")
