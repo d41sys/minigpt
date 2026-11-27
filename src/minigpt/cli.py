@@ -75,6 +75,7 @@ from minigpt.grpo import (
     make_shaper,
     train_grpo,
 )
+from minigpt.lora import apply_lora, merge_lora
 from minigpt.model import GPTConfig, GPTModel, MoEFeedForward, count_parameters
 from minigpt.monitor import lenient_reward, rollout_monitor, summarize_hack
 from minigpt.opd import train_opd
@@ -568,6 +569,40 @@ def add_optim_arg(s: argparse.ArgumentParser) -> None:
         default="adamw",
         help="muon: Muon on hidden 2-D weights, AdamW on the rest (DeepSeek-V4 report 2.4)",
     )
+
+
+def add_lora_args(s: argparse.ArgumentParser) -> None:
+    s.add_argument(
+        "--lora-rank",
+        type=int,
+        default=0,
+        help="LoRA rank R: freeze the model, train B @ A on the linears; the saved checkpoint is "
+        "merged (plain GPT). 0 = full fine-tuning",
+    )
+    s.add_argument(
+        "--lora-alpha", type=float, default=16.0, help="LoRA scale is alpha / R (default 16)"
+    )
+    s.add_argument(
+        "--lora-targets",
+        choices=["all", "attn"],
+        default="all",
+        help="all: attention + MLP linears; attn: attention projections only",
+    )
+    s.add_argument(
+        "--lora-embed",
+        action="store_true",
+        help="also train the token embeddings and the tied LM head (for tokens the base never saw)",
+    )
+
+
+def start_lora(model: GPTModel, args: argparse.Namespace) -> None:
+    if args.lora_rank:
+        total = sum(p.numel() for p in model.parameters())
+        n = apply_lora(model, args.lora_rank, args.lora_alpha, args.lora_targets, args.lora_embed)
+        print(
+            f"lora rank={args.lora_rank} alpha={args.lora_alpha:g} targets={args.lora_targets} "
+            f"embed={args.lora_embed} trainable={n:,} of {total:,}"
+        )
 
 
 def load_teachers(specs: list[str], ops: tuple[str, ...]) -> dict[str, GPTModel]:
@@ -1135,6 +1170,7 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     device = get_device()
     tok = reasoning_tokenizer()
     model = load_model(require(Path(args.base), "reason-pretrain"))
+    start_lora(model, args)
     rng = random.Random(args.seed + 1000)  # apart from the fixed tasks of `reason-eval`
     tasks = [sample_task(rng, rng.randint(1, args.max_digits), args.ops) for _ in range(args.n)]
     ops = ",".join(args.ops)
@@ -1150,6 +1186,7 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     )
     for row in res["history"]:
         print(f"epoch {row['epoch']} loss {row['loss']:.4f}")
+    merge_lora(model)
     save_checkpoint(Path(args.out), model, None, step=args.epochs, val_loss=res["final_loss"])
     print(f"checkpoint -> {args.out}")
 
@@ -1176,6 +1213,9 @@ def run_grpo(
     device = get_device()
     tok = reasoning_tokenizer()
     policy = load_model(require(Path(args.base), "reason-sft"))
+    if args.lora_rank and args.ref_reset_every:
+        sys.exit("--lora-rank cannot be combined with --ref-reset-every")
+    start_lora(policy, args)
     ref = load_model(args.base)
     print(
         f"device={device} loss_agg={args.loss_agg} std_norm={not args.no_std_norm} "
@@ -1251,6 +1291,7 @@ def run_grpo(
         device=device,
     )
     out = Path(args.out)
+    merge_lora(policy)
     save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
     (out.parent / "history.json").write_text(json.dumps(res["history"]), encoding="utf-8")
     print("greedy on fixed tasks, SFT start:")
@@ -1378,6 +1419,7 @@ def add_grpo_args(s: argparse.ArgumentParser, out: Path) -> None:
         "optimizer (ProRL); 0 = never",
     )
     add_optim_arg(s)
+    add_lora_args(s)
     add_ops_arg(s)
     s.add_argument("--out", default=str(out))
 
@@ -1797,6 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_ops_arg(s)
     s.add_argument("--out", default=str(REASON_SFT_CKPT))
     add_optim_arg(s)
+    add_lora_args(s)
     s.set_defaults(func=cmd_reason_sft)
 
     s = sub.add_parser("reason-eval", help="greedy accuracy / format / length, 1-5 digits")
