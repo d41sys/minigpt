@@ -34,15 +34,18 @@ class LoRALinear(nn.Module):
         return out
 
 
-def apply_lora(model: GPTModel, rank: int, alpha: float, targets: str) -> int:
+def apply_lora(model: GPTModel, rank: int, alpha: float, targets: str, embed: bool = False) -> int:
     """Freeze `model`, wrap the target linears in place, return the trainable parameter count.
 
     targets: "attn" = attention `c_attn`, `c_proj`; "all" = those plus the MLP `c_fc`, `c_proj`.
+    embed: keep the token embeddings (and the tied LM head) trainable, as PEFT's `modules_to_save`
+    does for tokens the base never saw.
     """
     if targets not in ("all", "attn"):
         raise ValueError(f"lora targets {targets!r}: expected 'all' or 'attn'")
     wanted = ALL if targets == "all" else ATTN
     model.requires_grad_(False)
+    model.wte.requires_grad_(embed)
     for block in model.blocks:
         for attr, names in wanted.items():
             parent = getattr(block, attr)

@@ -558,15 +558,20 @@ def add_lora_args(s: argparse.ArgumentParser) -> None:
         default="all",
         help="all: attention + MLP linears; attn: attention projections only",
     )
+    s.add_argument(
+        "--lora-embed",
+        action="store_true",
+        help="also train the token embeddings and the tied LM head (for tokens the base never saw)",
+    )
 
 
 def start_lora(model: GPTModel, args: argparse.Namespace) -> None:
     if args.lora_rank:
         total = sum(p.numel() for p in model.parameters())
-        n = apply_lora(model, args.lora_rank, args.lora_alpha, args.lora_targets)
+        n = apply_lora(model, args.lora_rank, args.lora_alpha, args.lora_targets, args.lora_embed)
         print(
             f"lora rank={args.lora_rank} alpha={args.lora_alpha:g} targets={args.lora_targets} "
-            f"trainable={n:,} of {total:,}"
+            f"embed={args.lora_embed} trainable={n:,} of {total:,}"
         )
 
 

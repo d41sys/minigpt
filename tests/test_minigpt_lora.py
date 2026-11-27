@@ -13,12 +13,12 @@ TINY = GPTConfig(vocab_size=50, context_length=8, d_model=16, num_layers=2, num_
 X = torch.randint(0, 50, (2, 8))
 
 
-def lora_model(targets: str = "all") -> tuple[GPTModel, GPTModel, int]:
+def lora_model(targets: str = "all", embed: bool = False) -> tuple[GPTModel, GPTModel, int]:
     torch.manual_seed(0)
     base = GPTModel(TINY).eval()
     model = GPTModel(TINY).eval()
     model.load_state_dict(base.state_dict())
-    return base, model, apply_lora(model, 2, alpha=4.0, targets=targets)
+    return base, model, apply_lora(model, 2, alpha=4.0, targets=targets, embed=embed)
 
 
 def randomize_b(model: GPTModel) -> None:
@@ -52,6 +52,15 @@ def test_only_a_and_b_get_gradients(targets: str, wrapped: int, params: int) -> 
     assert all(p.grad is None for n, p in named.items() if not n.endswith((".A", ".B")))
     assert sum(isinstance(m, LoRALinear) for m in model.modules()) == wrapped
     assert trainable == params  # rank 2: A is 2 x in, B is out x 2
+
+
+def test_embed_flag_also_trains_the_tied_embedding() -> None:
+    _, model, trainable = lora_model(embed=True)
+    randomize_b(model)
+    model.train()
+    model(X, targets=X)[1].backward()
+    assert model.wte.weight.grad is not None and model.lm_head.weight is model.wte.weight
+    assert trainable == 1024 + 50 * 16  # vocab x d_model, shared with the LM head
 
 
 def test_merged_checkpoint_loads_as_a_plain_model(tmp_path: Path) -> None:
