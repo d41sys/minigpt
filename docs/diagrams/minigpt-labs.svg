@@ -126,7 +126,7 @@
 <text class="n" x="815" y="305">Process reward model</text>
 <text class="s" x="815" y="320">prm, best-of-n</text>
 <rect class="mask" x="726" y="334" width="178" height="44" rx="6"/>
-<rect class="acc" x="726" y="334" width="178" height="44" rx="6"/>
+<rect class="part" x="726" y="334" width="178" height="44" rx="6"/>
 <text class="n" x="815" y="353">CoT monitor</text>
 <text class="s" x="815" y="368">hack-demo</text>
 
