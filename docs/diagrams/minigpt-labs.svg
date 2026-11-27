@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 960 440" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="minigpt-labs-title minigpt-labs-desc" id="minigpt-labs-root">
 <title id="minigpt-labs-title">minigpt against the published pipelines of DeepSeek, Anthropic and OpenAI</title>
-<desc id="minigpt-labs-desc">Three swimlanes, one per lab, with stages from pretraining through mid-training and SFT, preference learning and RL, to distillation, safety and checks. Boxes minigpt reproduces at toy scale are filled blue, partial ones have a blue outline, in-progress ones a dashed blue outline, and stages minigpt does not reproduce are plain.</desc>
+<desc id="minigpt-labs-desc">Three swimlanes, one per lab, with stages from pretraining through mid-training and SFT, preference learning and RL, to distillation, safety and checks. Boxes minigpt reproduces at toy scale are filled blue, partial ones have a blue outline, and stages minigpt does not reproduce are plain.</desc>
 <defs>
 <style>
 #minigpt-labs-root .n { fill: #1f2328; font-size: 12px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; text-anchor: middle; }
@@ -15,7 +15,6 @@
 #minigpt-labs-root .data { fill: #1f2328; fill-opacity: 0.05; stroke: #59636e; stroke-width: 1; }
 #minigpt-labs-root .acc { fill: #0969da; fill-opacity: 0.08; stroke: #0969da; stroke-width: 1; }
 #minigpt-labs-root .part { fill: #ffffff; stroke: #0969da; stroke-width: 1; }
-#minigpt-labs-root .wip { fill: #ffffff; stroke: #0969da; stroke-width: 1; stroke-dasharray: 4 3; }
 #minigpt-labs-root .a { fill: none; stroke: #59636e; stroke-width: 1.2; marker-end: url(#minigpt-labs-arrow); }
 </style>
 <marker id="minigpt-labs-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#59636e"/></marker>
@@ -89,9 +88,9 @@
 <text class="s" x="623" y="252">cai-data --stage rl</text>
 <path class="a" d="M 713,216 L 725,216"/>
 <rect class="mask" x="726" y="170" width="178" height="44" rx="6"/>
-<rect class="wip" x="726" y="170" width="178" height="44" rx="6"/>
+<rect class="part" x="726" y="170" width="178" height="44" rx="6"/>
 <text class="n" x="815" y="189">Constitutional classifiers</text>
-<text class="s" x="815" y="204">in progress, see recipe</text>
+<text class="s" x="815" y="204">guard</text>
 <rect class="mask" x="726" y="218" width="178" height="44" rx="6"/>
 <rect class="part" x="726" y="218" width="178" height="44" rx="6"/>
 <text class="n" x="815" y="237">Reward-hack screening</text>
@@ -123,9 +122,9 @@
 <text class="s" x="623" y="368">grpo, grpo --efforts</text>
 <path class="a" d="M 713,332 L 725,332"/>
 <rect class="mask" x="726" y="286" width="178" height="44" rx="6"/>
-<rect class="wip" x="726" y="286" width="178" height="44" rx="6"/>
+<rect class="acc" x="726" y="286" width="178" height="44" rx="6"/>
 <text class="n" x="815" y="305">Process reward model</text>
-<text class="s" x="815" y="320">in progress, prm</text>
+<text class="s" x="815" y="320">prm, best-of-n</text>
 <rect class="mask" x="726" y="334" width="178" height="44" rx="6"/>
 <rect class="acc" x="726" y="334" width="178" height="44" rx="6"/>
 <text class="n" x="815" y="353">CoT monitor</text>
@@ -137,8 +136,6 @@
 <text class="leg" x="152" y="425">minigpt reproduces it</text>
 <rect class="part" x="320" y="416" width="24" height="12" rx="2"/>
 <text class="leg" x="352" y="425">partial</text>
-<rect class="wip" x="460" y="416" width="24" height="12" rx="2"/>
-<text class="leg" x="492" y="425">in progress</text>
-<rect class="stage" x="620" y="416" width="24" height="12" rx="2"/>
-<text class="leg" x="652" y="425">not reproduced</text>
+<rect class="stage" x="460" y="416" width="24" height="12" rx="2"/>
+<text class="leg" x="492" y="425">not reproduced</text>
 </svg>

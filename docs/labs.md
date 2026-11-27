@@ -2,8 +2,8 @@
 
 This page lists each lab's published training pipeline, stage by stage, with a primary source
 and date, then says which stage a minigpt command reproduces at toy scale (`has`, `partial`,
-`missing`, `in progress`). No new experiment was run for it. Toy results are the README's, at the
-seed counts stated there; they test a stage's shape on addition, not any lab's claim.
+`missing`). Toy results are the README's, at the seed counts stated there; they test a stage's
+shape on addition, not any lab's claim.
 
 ![minigpt against the published pipelines of DeepSeek, Anthropic and OpenAI: three swimlanes from pretraining through SFT and preference or RL to distillation, safety and checks, with the stages minigpt reproduces filled in](diagrams/minigpt-labs.svg)
 
@@ -114,7 +114,7 @@ environments is an outsider reading of rows 2-4, 9 and 10, not a statement by An
 | 3 | SL-CAI | `cai-data --stage sl`, `cai-train --stage sl`; [constitution](cai/constitution.md) | has | Adherence 1.00 to 1.25 on 20 prompts (1 seed, judge `qwen3:8b`, no CI) |
 | 4 | RL-CAI | `cai-data --stage rl`, `cai-train --stage rl` | partial | DPO replaces the preference model + RL. The judge picked the first-shown answer 86.1% (93/108), so DPO mostly learned position noise |
 | 5 | Character training | `cai-*` with `--constitution` pointing at a trait file | partial | Same code path; no trait file is shipped and no run was made |
-| 6, 7, 13 | Constitutional classifiers, exchange classifier, cascade, probe | [`docs/recipes/constitutional-classifiers.md`](recipes/constitutional-classifiers.md), in progress, see recipe | in progress | |
+| 6, 7, 13 | Constitutional classifiers, cascade, probe | `guard`; [`docs/recipes/constitutional-classifiers.md`](recipes/constitutional-classifiers.md) | partial | Template data, not LLM-generated; no exchange classifier. Probe on the policy's activations: 0.070–0.085 attack success on held-out obfuscated attacks, no measurable difference from an input classifier fine-tuned from the same policy at about 1/2,500 of its compute; cascade cuts the probe's look-alike false refusals from 0.21–0.225 to 0.025–0.075 (4 seeds) |
 | 8 | Constitution as the spec | [`docs/cai/constitution.md`](cai/constitution.md) | partial | 7 original lines, not Anthropic's text |
 | 10 | Reward-hack screening of RL episodes | `hack-demo`, rule-based CoT monitor in `monitor.py` | partial | From a weak SFT base the exploit paid (hack rate 0.077 to 0.197, true accuracy 0.048 to 0.001); monitor recall 0.92, precision 0.04. A rule monitor, not a trained classifier |
 | 11 | Inoculation prompting, emergent misalignment | none | missing | |
@@ -164,7 +164,7 @@ not say). **I**: that o-series RL is "GRPO-like" is an outsider guess; the lab h
 | 1 | SFT on demonstrations | `sft` (Alpaca 1k), `reason-sft` | has | |
 | 1 | Reward model | `reward-model` | has | Held-out pairwise accuracy 0.827 with 1,908 pairs; 0.500 (chance) with the default 232 |
 | 1 | PPO + KL to SFT | `ppo` | has | Gold accuracy fell at every beta; unstable, not a clean overoptimization curve. No PPO-ptx |
-| 2 | Process reward model | [`docs/recipes/prm.md`](recipes/prm.md), command `prm`, in progress, see recipe | in progress | Outcome-vs-process comparison with step labels from an exact checker |
+| 2 | Process reward model | `prm`, `best-of-n`, `grpo --prm`; [`docs/recipes/prm.md`](recipes/prm.md) | has | Step labels from an exact checker, not humans. Best-of-16 on 3 digits: PRM 0.245–0.365 beats ORM 0.100–0.140; no measurable difference from majority vote (0.355). PRM-shaped GRPO reward: no measurable difference (4 seeds) |
 | 3, 10 | Instruction hierarchy, harmony format, tools | none | missing | |
 | 4 | Model Spec | [`docs/cai/constitution.md`](cai/constitution.md) plays the role of a spec for the judge | partial | |
 | 5 | Rule-based rewards | none as such; `lenient_reward` and `accuracy_reward` are rule graders | partial | The rule-grader exploit is `hack-demo` |
@@ -195,15 +195,15 @@ What toy scale cannot show:
 | SFT / mid-training | Cold start of long CoT (R1); 1.5M mixed SFT (V3); specialist-generated data (V3.2, V4) (P) | SL-CAI revisions; character-trait data; details of current SFT unpublished (P, partly) | Labeler demonstrations (InstructGPT); spec-citing CoT data (deliberative alignment) (P) | `sft`, `reason-sft`, `cai-train --stage sl`, `reason-rft` |
 | Preference / RL | GRPO on verifiable and rubric rewards; RL replaced by OPD in V4 (P) | Preference model + RL (HH-RLHF), RLAIF (RL-CAI), RL on production environments (P) | PPO on a reward model (InstructGPT), large-scale CoT RL (o-series, algorithm unpublished) (P) | `ppo`, `grpo` (many loss variants), `reason-dpo`, `dpo`, `cai-train --stage rl` |
 | Reward source | Rules and tests; generative reward model with rubrics, trained as the actor (V4); safety RM 106k prompts (R1) (P) | Human crowd preferences, AI judgments against a constitution, automated hack classifiers on RL episodes (P) | Human rankings, step labels (PRM800K), LLM-graded rule propositions, spec-aware judge (P) | Exact checker, program labeler, Ollama judge against 7 principles |
-| Safety method | No training method documented in V4 or V4.1; safety RM and a risk-control system in R1 (P) | Constitutional AI, constitutional classifiers and probes, constitution, hack screening, audits (P) | Deliberative alignment, instruction hierarchy, rule-based rewards, CoT monitoring without CoT pressure, misalignment monitors (P) | CAI; CoT monitor (`hack-demo`); classifiers and PRM in progress |
+| Safety method | No training method documented in V4 or V4.1; safety RM and a risk-control system in R1 (P) | Constitutional AI, constitutional classifiers and probes, constitution, hack screening, audits (P) | Deliberative alignment, instruction hierarchy, rule-based rewards, CoT monitoring without CoT pressure, misalignment monitors (P) | CAI; CoT monitor (`hack-demo`); classifiers, probe and cascade (`guard`); PRM (`prm`) |
 | Distillation | Specialists to one student: SFT on specialist data (V3.2), then multi-teacher full-vocabulary OPD with 10 to 40+ teachers (V4, V4.1); R1 to small models by SFT (P) | Prompt-distilled training data (a model with a rubric prompt trains one without it, card §6.5.1) (P); no model-to-model recipe published | "Large-scale distillation" named in the gpt-oss abstract; no recipe (P) | `opd` (single and multi-teacher, on and off policy), `reason-rft --sampler`, `merge` |
 
 Reading it: DeepSeek's contribution is mostly an open, verifiable recipe, so minigpt covers most
 of its post-training. Anthropic's is how to specify behaviour in text (constitution, principles,
-traits) and defend it with classifiers; minigpt covers the training stages and has the defence in
-progress. OpenAI's is a mix of reasoning RL, reward design (process and rule-based) and
-monitoring; minigpt covers the RL and monitor and has process rewards in progress, while
-deliberative alignment and the instruction hierarchy are missing.
+traits) and defend it with classifiers; minigpt covers the training stages and a toy version of
+the classifier defence. OpenAI's is a mix of reasoning RL, reward design (process and rule-based)
+and monitoring; minigpt covers the RL, the monitor and process rewards, while deliberative
+alignment, rule-based rewards and the instruction hierarchy are missing.
 
 The labs also borrow from each other. DeepSeek-V3 used a constitutional-AI-style self-vote
 (Anthropic's method) for open-ended feedback; V4 cites on-policy distillation from Gu et al.
@@ -222,5 +222,5 @@ reward model and OpenAI's spec-aware judge are both LLM-as-reward designs.
 | Constitutional AI | `cai-data`, `cai-train`, `cai-eval` | [`cai/constitution.md`](cai/constitution.md) |
 | InstructGPT RLHF | `sft`, `reward-model`, `ppo` | [README](../README.md#rlhf-reward-model--ppo) |
 | CoT monitor and reward hacking | `hack-demo` | [README](../README.md#cot-monitor-and-reward-hacking) |
-| Process reward model (in progress) | `prm` | [`recipes/prm.md`](recipes/prm.md) |
-| Constitutional classifiers + probe (in progress) | see recipe | [`recipes/constitutional-classifiers.md`](recipes/constitutional-classifiers.md) |
+| Process reward model | `prm`, `best-of-n` | [`recipes/prm.md`](recipes/prm.md) |
+| Constitutional classifiers + probe | `guard` | [`recipes/constitutional-classifiers.md`](recipes/constitutional-classifiers.md) |
