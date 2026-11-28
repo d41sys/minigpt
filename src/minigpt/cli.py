@@ -280,10 +280,10 @@ def download_chatmix(raw_dir: Path, tinystories_bytes: int, fineweb_docs: int) -
         eot = "<|endoftext|>"
         stories = download_tinystories(raw_dir / "chatmix_parts", tinystories_bytes)
         docs = stories.read_text(encoding="utf-8").split(eot)[:-1]
-        stories.unlink()
-        stories.parent.rmdir()
         for row in hf_rows("HuggingFaceFW/fineweb-edu", "sample-10BT", "train", fineweb_docs):
             docs.append(row["text"].replace(eot, ""))
+        stories.unlink()  # kept until here so a failed fetch does not repeat the 400 MB download
+        stories.parent.rmdir()
         docs = [d.strip() for d in docs if d.strip()]
         random.Random(0).shuffle(docs)
         tmp = path.with_suffix(".part")

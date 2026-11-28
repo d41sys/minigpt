@@ -42,3 +42,28 @@ Decision, fixed now:
 - C vs B decides grouped-query attention (only if the modern block is chosen): C better, or no
   measurable difference, means 8 query / 4 key-value heads; B better means plain multi-head.
   GQA is smaller in the KV cache at equal parameters, so a tie goes to it.
+
+### Result (4 seeds, final-step model)
+
+| Arm | Params | Test loss s0 / s1 / s2 / s3 | Test range | Val loss s0 / s1 / s2 / s3 | Val range | Train loss s0 / s1 / s2 / s3 |
+|---|---|---|---|---|---|---|
+| A GPT-2 block | 5,066,752 | 1.4182 / 1.4200 / 1.4198 / 1.4164 | 1.4164-1.4200 | 1.5035 / 1.5090 / 1.5065 / 1.5055 | 1.5035-1.5090 | 1.4307 / 1.4341 / 1.4338 / 1.4311 |
+| B modern | 5,098,496 (+0.63%) | 1.3424 / 1.3342 / 1.3317 / 1.3290 | 1.3290-1.3424 | 1.4324 / 1.4238 / 1.4238 / 1.4209 | 1.4209-1.4324 | 1.3489 / 1.3409 / 1.3393 / 1.3351 |
+| C modern + GQA 8q/4kv, d_ff 784 | 5,073,344 (+0.13%) | 1.3375 / 1.3327 / 1.3326 / 1.3391 | 1.3326-1.3391 | 1.4288 / 1.4240 / 1.4252 / 1.4310 | 1.4240-1.4310 | 1.3434 / 1.3387 / 1.3401 / 1.3458 |
+
+Arm A at seed 0 reproduces the dense row of the DeepSeek-V4 recipe (test 1.418, val 1.504, train
+1.431), so the refactored model code leaves the GPT-2 block numerically unchanged.
+
+| Pair | Test: gap vs wider range | Val: gap vs wider range | Verdict |
+|---|---|---|---|
+| A vs B | 1.4164 − 1.3424 = 0.0740 vs 0.0134 | 1.5035 − 1.4324 = 0.0711 vs 0.0115 | **B better** (mean test 1.3343 vs 1.4186, −0.084, −5.9%) |
+| C vs B | ranges overlap | ranges overlap | **no measurable difference** (mean test +0.001 for C) |
+| A vs C (not a pre-registered pair, same rule) | 1.4164 − 1.3391 = 0.0773 vs 0.0065 | 1.5035 − 1.4310 = 0.0725 vs 0.0070 | C better |
+
+Decision by the rule above: the chat model uses the modern block, and, because C vs B is a tie,
+8 query / 4 key-value heads.
+
+Limits: the arms differ in three parts at once (norm, MLP, positions), so which part carries
+the −0.084 is not separated. [INFERENCE] RoPE and SwiGLU are the likelier sources; nothing here
+tests it. One corpus, one size (5M), 4000 steps (1.75 epochs). Wall times of the 12 runs (123-177 s)
+are not comparable: the GPUs were shared with other jobs.

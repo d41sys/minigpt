@@ -121,9 +121,12 @@ class MixedLoader:
             yield torch.cat([x for x, _ in parts]), torch.cat([y for _, y in parts])
 
 
-def hf_rows(dataset: str, config: str, split: str, n: int) -> Iterator[dict[str, Any]]:
+def hf_rows(
+    dataset: str, config: str, split: str, n: int, pause: float = 0.5
+) -> Iterator[dict[str, Any]]:
     """The first `n` rows of a Hugging Face dataset split (fewer if it ends), 100 per request,
-    from the datasets-server JSON API. Raises after 5 failed attempts at one request."""
+    from the datasets-server JSON API. The server rate-limits (HTTP 429): wait `pause` seconds
+    between requests and back off 15-120 s on errors; raises after 6 failed attempts."""
     for offset in range(0, n, 100):
         query = urllib.parse.urlencode(
             {
@@ -134,7 +137,7 @@ def hf_rows(dataset: str, config: str, split: str, n: int) -> Iterator[dict[str,
                 "length": min(100, n - offset),
             }
         )
-        for attempt in range(5):
+        for attempt in range(6):
             try:
                 req = urllib.request.Request(
                     f"https://datasets-server.huggingface.co/rows?{query}",
@@ -144,9 +147,10 @@ def hf_rows(dataset: str, config: str, split: str, n: int) -> Iterator[dict[str,
                     rows = json.loads(resp.read())["rows"]
                 break
             except OSError:
-                if attempt == 4:
+                if attempt == 5:
                     raise
-                time.sleep(2**attempt)
+                time.sleep(min(120, 15 * 2**attempt))
+        time.sleep(pause)
         yield from (r["row"] for r in rows)
         if len(rows) < min(100, n - offset):
             return

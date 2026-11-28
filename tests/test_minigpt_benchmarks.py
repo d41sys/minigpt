@@ -96,5 +96,5 @@ def test_hf_rows_pages_by_100(monkeypatch: pytest.MonkeyPatch) -> None:
         return Resp(100 if "offset=0" in req.full_url else 20)  # the split ends at 120 rows
 
     monkeypatch.setattr(data.urllib.request, "urlopen", fake_urlopen)
-    assert len(list(hf_rows("d", "c", "s", 500))) == 120
+    assert len(list(hf_rows("d", "c", "s", 500, pause=0))) == 120
     assert len(urls) == 2 and "length=100" in urls[1]
