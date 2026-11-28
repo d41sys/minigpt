@@ -15,7 +15,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 |---|---|---|
 | Tokenizer | `bpe.py` | byte-level BPE trainer/encoder/decoder, GPT-2 pre-tokenisation regex, JSON save/load, special tokens |
 | Data | `data.py` | sliding-window `(x, y)` next-token dataset |
-| Model | `model.py` | token + learned position embeddings (or RoPE via `--pos-encoding rope`), own causal MHA (optional `F.scaled_dot_product_attention`), pre-LN blocks, GELU MLP, weight-tied head, `generate(temperature, top_k)` with a per-layer KV cache (O(T) per new token instead of O(T²); falls back to crop-and-recompute past the context length) |
+| Model | `model.py` | token + learned position embeddings (or RoPE via `--pos-encoding rope`), own causal MHA (optional `F.scaled_dot_product_attention`), pre-LN blocks, GELU MLP, weight-tied head, `generate(temperature, top_k)` with a per-layer KV cache (O(T) per new token instead of O(T²); falls back to crop-and-recompute past the context length). Optional modern block: `--norm rmsnorm`, `--mlp-type swiglu`, grouped-query attention via `--num-kv-heads` |
 | Training | `train.py` | AdamW (decay on 2-D weights only), linear warmup + cosine LR, clip 1.0, periodic eval, best-val checkpoint, device mps → cuda → cpu |
 | Pretrained | `pretrained.py` | HF GPT-2 124M safetensors → `GPTConfig(50257, 1024, 768, 12, 12)`, Conv1D transposes |
 | Classifier | `finetune_cls.py` | head swap to 2 classes; train last block + final LN + head on UCI SMS Spam (balanced, 70/10/20) |
@@ -27,7 +27,7 @@ Each stage of a modern LM pipeline is shown as a small, testable module:
 | OPD | `opd.py` | full-vocabulary reverse-KL on-policy distillation, one teacher per operator |
 | CoT monitor | `monitor.py` | lenient grader that can be hacked and a monitor that flags traces whose work disagrees with the answer |
 | RLHF | `rlhf.py` | Bradley-Terry reward model on the policy's own samples, PPO with GAE and a per-token KL penalty |
-| Eval | `evaluate.py` | perplexity, exact match, token F1, likelihood ranking, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport` |
+| Eval | `evaluate.py` | perplexity, exact match, token F1, likelihood ranking, `Judge` protocol with an offline `MockJudge` and an Ollama LLM judge (1-5), weighted `EvalReport`; `benchmark` scores multiple-choice sets (ARC-Easy, PIQA, OpenBookQA, HellaSwag) by summed option log-probability, with standard errors |
 
 ## Architecture
 
@@ -45,6 +45,10 @@ Datasets are downloaded at run time from their sources. The only redistributed d
 | Alpaca (SFT, DPO) | [tatsu-lab/stanford_alpaca](https://github.com/tatsu-lab/stanford_alpaca) | CC BY-NC 4.0, research use only; so are the SFT and DPO checkpoints derived from it |
 | SMS Spam Collection | [UCI ML Repository](https://archive.ics.uci.edu/dataset/228/sms+spam+collection) | CC BY 4.0 |
 | GPT-2 124M weights | [Hugging Face `gpt2`](https://huggingface.co/openai-community/gpt2) | OpenAI's modified MIT licence |
+| TinyStories (pretraining) | [roneneldan/TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) | CDLA-Sharing-1.0 |
+| FineWeb-edu `sample-10BT` (chat-model pretraining, first 120,000 documents) | [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | ODC-By 1.0, and Common Crawl's terms of use |
+| Dolly-15k (chat SFT) | [databricks/databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | CC BY-SA 3.0 |
+| ARC-Easy, PIQA, OpenBookQA, HellaSwag (evaluation only) | Hugging Face dataset cards, listed in [`docs/recipes/chat-model.md`](docs/recipes/chat-model.md) | ARC: CC BY-SA 4.0; the other three cards state no licence |
 
 ## Quickstart
 
@@ -414,6 +418,16 @@ Four techniques companies use in 2026 to adapt a model, tested at toy scale on t
 |---|---|
 | Process reward model (OpenAI; `prm`, `best-of-n`, `grpo --prm`) | Fixed SFT policy (3-digit pass@1 0.175, pass@16 0.80); a process reward model trained on per-column step labels from an exact checker vs an outcome reward model on the same 12,000 samples. Best-of-16 on 600 held-out 3-digit tasks (4 verifier seeds): PRM (min over steps) 0.245–0.365 beats ORM 0.100–0.140, which is below random (0.199); no measurable difference between PRM and majority vote (0.355). Post hoc: at N=4 the PRM beats majority at 1–3 digits, at N=16 majority wins at 1–2 digits, so the PRM's lead shrinks with N, unlike the paper. GRPO with a PRM-shaped reward vs outcome reward: 0.825–0.885 vs 0.785–0.830, no measurable difference. Labels are program-made, not human |
 | Constitutional classifiers (Anthropic; `guard`) | Forbidden rule "sum ≥ 500", so no token marks a forbidden request; guards trained on two plain wordings, attacked with 6 obfuscated wordings they never saw plus a quiet mode with no written trace. Pooled attack success (4 seeds): from-scratch input classifier 0.293–0.560, from-scratch output classifier 0.370–0.473, linear probe on the policy's activations 0.070–0.085. The policy was trained on the obfuscated wordings, so a post-hoc control fine-tunes classifiers from the policy's weights: input 0.037–0.095 (no measurable difference from the probe, at 2,500× the probe's compute), output 0.000–0.007 (better than the probe, at 12,000× its compute). This suggests (not tested further) that the probe's lead over the from-scratch guards comes from the policy's exposure, and that what the probe buys is cost. A cascade (probe, then from-scratch classifier) gives 0.080–0.120 attack success; the probe alone false-refuses 0.21–0.225 of near-miss look-alikes (sum 440–499), which the cascade cuts to 0.025–0.075. Templates replace the paper's LLM data generator; one policy, fixed attack list |
+
+### Chat model, tool use and one view of the losses
+
+Three additions made after comparing this repo with [jingyaogong/minimind](https://github.com/jingyaogong/minimind), which ships a usable 64M chat model, tool-use RL and a unified explanation of its losses. [`docs/algorithms.md`](docs/algorithms.md) puts every training loss in this repo into one table (samples from, learning signal, regulariser, code location, toy result), with the formulas as the code computes them and the places where they differ from the papers.
+
+| Addition | Small-scale result |
+|---|---|
+| Modern block (`--norm rmsnorm --mlp-type swiglu --pos-encoding rope`, `--num-kv-heads`; [`chat-model.md`](docs/recipes/chat-model.md)) | 5M parameters on TinyStories, equal parameters within 1%, 4 seeds, final-step test loss: GPT-2 block 1.416–1.420, modern block 1.329–1.342, so the modern block is better (gap 0.074 against a wider range of 0.013). Adding grouped-query attention (8 query / 4 key-value heads): 1.333–1.339, no measurable difference from the modern block. The three changes were made together, so which one carries the gain is not separated |
+| Chat model (`data chatmix`, `pretrain`, `sft`, `generate --chat`, `benchmark`) | One seed. 50.6M parameters (d512, 16 layers, vocabulary 6,400), pretrained on 233M tokens of TinyStories and FineWeb-edu for about 4 epochs, then SFT on Dolly-15k; about 2.6 GPU-hours on a shared RTX 4090. Zero-shot accuracy, pretrained → SFT (chance): ARC-Easy 0.376 → 0.356 (0.25), PIQA 0.580 → 0.577 (0.50), HellaSwag 0.271 → 0.271 (0.25), OpenBookQA 0.150 → 0.168 (0.25; 0.268 → 0.262 when length-normalised, which does not separate from chance). SFT and pretrained do not separate on any task. Of 10 fixed prompts only "capital of France" is answered correctly; the samples are in the recipe unedited. No external model was compared |
+| Tool-use RL (`--chain tool` on `reason-sft`, `reason-eval`, `grpo`; [`tool-rl.md`](docs/recipes/tool-rl.md)) | Tasks `a+b-c` with a one-operation calculator: two chained calls, reward only at the end of the episode, observation tokens masked from the loss. Held-out accuracy, 4 seeds: SFT on 3,000 scripted traces 0.290–0.900, plus 200 GRPO steps 0.270–0.935, no measurable difference; the spread comes from the SFT stage. The tool arm beats a no-tool arm at equal SFT (0.000–0.020), which starts at the floor and gives GRPO no signal; against a no-tool arm with 2.5× the SFT epochs there is no measurable difference. Two more SFT epochs without RL reach 0.770–0.925. One-seed probes: a reward paying per call produced no call spam, and a call cost did not teach the policy to skip the tool on 1-digit tasks; the scripted traces always have two calls |
 
 ## Design decisions
 
