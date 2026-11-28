@@ -49,8 +49,8 @@ class Task:
     def answer(self) -> str:
         return str(self.a + self.b if self.op == "+" else self.a - self.b)
 
-    def solution(self) -> str:
-        """Reference completion: column-wise steps with carries (borrows), then the answer."""
+    def steps(self) -> list[str]:
+        """Column-wise steps with carries (borrows), right to left."""
         xs, ys = str(self.a)[::-1], str(self.b)[::-1]
         add = self.op == "+"
         carry, steps = 0, list[str]()
@@ -60,7 +60,11 @@ class Task:
             s = x + y + carry if add else x - y - carry
             steps.append(f"{x}{self.op}{y}{self.op}{carry}={s}")
             carry = s // 10 if add else int(s < 0)
-        return f"<think>{' '.join(steps)}</think><answer>{self.answer}</answer>"
+        return steps
+
+    def solution(self) -> str:
+        """Reference completion: the column steps, then the answer."""
+        return f"<think>{' '.join(self.steps())}</think><answer>{self.answer}</answer>"
 
 
 def make_task(rng: random.Random, digits: int, op: str = "+") -> Task:
@@ -156,12 +160,16 @@ def sample_group(
 
 
 def build_batch(
-    prompts: list[list[int]], completions: list[list[int]], pad_id: int
+    prompts: list[list[int]],
+    completions: list[list[int]],
+    pad_id: int,
+    keeps: list[list[bool]] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Right-padded `(input_ids, labels)` for prompt+completion pairs.
 
     `labels[i, t]` is the token predicted at position t; prompt and padding targets are -100,
-    so only completion tokens are scored.
+    so only completion tokens are scored. `keeps[i][j] = False` also drops completion token j
+    (a tool observation: it is context, not something the policy wrote).
     """
     rows = [p + c for p, c in zip(prompts, completions, strict=True)]
     width = max(len(r) for r in rows) - 1
@@ -172,6 +180,9 @@ def build_batch(
         x[i, :n] = torch.tensor(row[:-1])
         y[i, :n] = torch.tensor(row[1:])
         y[i, : len(p) - 1] = -100
+        for j, keep in enumerate(keeps[i] if keeps else ()):
+            if not keep:
+                y[i, len(p) - 1 + j] = -100
     return x, y
 
 
