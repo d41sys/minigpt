@@ -219,7 +219,8 @@ def grpo_step(
     the last step and the `clip_fraction` averaged over the `mu` steps (0 at the first, ratio 1).
 
     `prompts` and `completions` are flat, group-major; `rewards` is `(groups, G)`. The old
-    log-probs are taken before the first inner step, so the ratio starts at exactly 1.
+    log-probs are taken before the first inner step, so the ratio starts at exactly 1. `keeps`
+    (per completion token, False = tool observation) removes those tokens from every term.
     """
     device = next(policy.parameters()).device
     adv = group_advantages(rewards, std_norm, mode=advantage).reshape(-1).to(device)
