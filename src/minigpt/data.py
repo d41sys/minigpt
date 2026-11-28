@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import multiprocessing
+import time
+import urllib.parse
+import urllib.request
 from collections.abc import Iterator, Sequence
+from pathlib import Path
+from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+from minigpt.bpe import BPETokenizer
 
 
 class SlidingWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
@@ -108,3 +119,92 @@ class MixedLoader:
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         for parts in zip(*self.loaders, strict=False):
             yield torch.cat([x for x, _ in parts]), torch.cat([y for _, y in parts])
+
+
+def hf_rows(
+    dataset: str, config: str, split: str, n: int, pause: float = 0.5
+) -> Iterator[dict[str, Any]]:
+    """The first `n` rows of a Hugging Face dataset split (fewer if it ends), 100 per request,
+    from the datasets-server JSON API. The server rate-limits (HTTP 429): wait `pause` seconds
+    between requests and back off 15-120 s on errors; raises after 6 failed attempts."""
+    for offset in range(0, n, 100):
+        query = urllib.parse.urlencode(
+            {
+                "dataset": dataset,
+                "config": config,
+                "split": split,
+                "offset": offset,
+                "length": min(100, n - offset),
+            }
+        )
+        for attempt in range(6):
+            try:
+                req = urllib.request.Request(
+                    f"https://datasets-server.huggingface.co/rows?{query}",
+                    headers={"User-Agent": "minigpt"},
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    rows = json.loads(resp.read())["rows"]
+                break
+            except OSError:
+                if attempt == 5:
+                    raise
+                time.sleep(min(120, 15 * 2**attempt))
+        time.sleep(pause)
+        yield from (r["row"] for r in rows)
+        if len(rows) < min(100, n - offset):
+            return
+
+
+_worker_tokenizer: BPETokenizer | None = None
+
+
+def _init_worker(tokenizer: BPETokenizer) -> None:
+    global _worker_tokenizer
+    _worker_tokenizer = tokenizer
+
+
+def _encode_piece(piece: str) -> npt.NDArray[np.uint16]:
+    assert _worker_tokenizer is not None
+    return np.asarray(_worker_tokenizer.encode(piece, allow_special=True), dtype=np.uint16)
+
+
+def tokenize_cached(
+    tokenizer: BPETokenizer,
+    text_path: Path,
+    cache_path: Path,
+    workers: int = 4,
+    piece_chars: int = 4_000_000,
+) -> npt.NDArray[np.uint16]:
+    """Token IDs (uint16) of a text file of `<|endoftext|>`-ended documents, cached as .npy.
+
+    The pure-Python encoder is slow, so ~`piece_chars` pieces cut at document ends are encoded
+    in `workers` processes; the result equals `tokenizer.encode(text, allow_special=True)`.
+    The cache is keyed by file name only: delete it when the tokenizer changes.
+    """
+    if cache_path.exists():
+        cached: npt.NDArray[np.uint16] = np.load(cache_path)
+        return cached
+    if tokenizer.vocab_size > np.iinfo(np.uint16).max + 1:
+        raise ValueError("uint16 token cache needs vocab_size <= 65536")
+    eot = "<|endoftext|>"
+    docs = text_path.read_text(encoding="utf-8").split(eot)
+    if docs[-1] == "":
+        docs.pop()
+    pieces: list[str] = []
+    group: list[str] = []
+    size = 0
+    for doc in docs:
+        group.append(doc)
+        size += len(doc)
+        if size >= piece_chars:
+            pieces.append(eot.join(group) + eot)
+            group, size = [], 0
+    if group:
+        pieces.append(eot.join(group) + eot)
+    with multiprocessing.Pool(workers, _init_worker, (tokenizer,)) as pool:
+        ids: npt.NDArray[np.uint16] = np.concatenate(pool.map(_encode_piece, pieces, chunksize=1))
+    tmp = cache_path.with_suffix(".tmp.npy")
+    np.save(tmp, ids)
+    tmp.replace(cache_path)
+    return ids
