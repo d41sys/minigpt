@@ -120,6 +120,15 @@ from minigpt.sft import (
     sft_collate_fn,
     train_sft,
 )
+from minigpt.tools import (
+    chain_reward,
+    chain_trace_dataset,
+    draw_task,
+    evaluate_chain,
+    format_chain,
+    held_out,
+    train_chain_grpo,
+)
 from minigpt.train import (
     get_device,
     load_checkpoint,
@@ -1186,12 +1195,20 @@ def cmd_reason_sft(args: argparse.Namespace) -> None:
     model = load_model(require(Path(args.base), "reason-pretrain"))
     start_lora(model, args)
     rng = random.Random(args.seed + 1000)  # apart from the fixed tasks of `reason-eval`
-    tasks = [sample_task(rng, rng.randint(1, args.max_digits), args.ops) for _ in range(args.n)]
-    ops = ",".join(args.ops)
-    print(f"device={device} traces={len(tasks)} digits=1-{args.max_digits} ops={ops}")
+    digits = (args.min_digits, args.max_digits)
+    if args.chain:
+        skip = held_out(digits)
+        chains = [draw_task(rng, digits, args.easy_frac, skip) for _ in range(args.n)]
+        data = chain_trace_dataset(chains, tok, args.chain, args.direct_frac, args.seed)
+    else:
+        tasks = [sample_task(rng, rng.randint(*digits), args.ops) for _ in range(args.n)]
+        data = sft_trace_dataset(tasks, tok, args.efforts, args.nothink_frac, args.seed)
+    print(
+        f"device={device} traces={args.n} digits={digits[0]}-{digits[1]} ops={','.join(args.ops)}"
+    )
     res = train_sft(
         model,
-        sft_trace_dataset(tasks, tok, args.efforts, args.nothink_frac, args.seed),
+        data,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
@@ -1231,6 +1248,13 @@ def cmd_reason_eval(args: argparse.Namespace) -> None:
     device = get_device()
     model = load_model(require(Path(args.checkpoint), "reason-sft")).to(device)
     tok = reasoning_tokenizer()
+    if args.chain:
+        digits = (args.min_digits, args.max_digits)
+        res = evaluate_chain(
+            model, tok, args.n, digits, tools=args.chain == "tool", easy_n=args.n * args.easy
+        )
+        print(format_chain(res))
+        return
     print(report_reasoning(model, tok, args.n, args.seed, args.efforts, args.ops))
     if args.pass_k:
         seed_everything(args.seed)
@@ -1346,11 +1370,78 @@ def run_grpo(
 
 
 def cmd_grpo(args: argparse.Namespace) -> None:
+    if args.chain:
+        run_chain_grpo(args)
+        return
     reward_fn: RewardFn = default_reward
     if args.prm:
         prm = load_reward_model(require(Path(args.prm), "prm")).to(get_device()).eval()
         reward_fn = prm_shaped_reward(default_reward, prm, reasoning_tokenizer(), args.prm_weight)
     run_grpo(args, reward_fn, None)
+
+
+def run_chain_grpo(args: argparse.Namespace) -> None:
+    """`grpo --chain`: multi-turn tool use (or its no-tool control), reward at the episode end."""
+    seed_everything(args.seed)
+    device = get_device()
+    tok = reasoning_tokenizer()
+    policy = load_model(require(Path(args.base), "reason-sft"))
+    ref = load_model(args.base)
+    digits, tools = (args.min_digits, args.max_digits), args.chain == "tool"
+
+    def evaluate(model: GPTModel) -> dict[str, Any]:
+        return evaluate_chain(
+            model.to(device),
+            tok,
+            args.eval_n,
+            digits,
+            args.max_new_tokens,
+            tools,
+            args.eval_n * (args.easy_frac > 0),
+        )
+
+    start = evaluate(ref)
+    print(f"greedy on held-out tasks, SFT start:\n{format_chain(start)}")
+
+    def log(rec: dict[str, float]) -> None:
+        if int(rec["step"]) % args.log_every == 0:
+            shown = " ".join(f"{k} {v:.3f}" for k, v in rec.items() if k != "step")
+            print(f"step {int(rec['step']):4d} {shown}")
+
+    res = train_chain_grpo(
+        policy,
+        ref,
+        tok,
+        chain_reward(args.call_cost, args.call_bonus),
+        tools,
+        steps=args.steps,
+        tasks_per_step=args.tasks,
+        group_size=args.group,
+        digits=digits,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        lr=args.lr,
+        beta=args.beta,
+        clip_eps=args.clip_eps,
+        mu=args.mu,
+        std_norm=not args.no_std_norm,
+        loss_agg=args.loss_agg,
+        optim=args.optim,
+        exclude=held_out(digits),
+        easy_frac=args.easy_frac,
+        seed=args.seed,
+        device=device,
+        on_step=log,
+    )
+    end = evaluate(policy)
+    print(f"greedy on held-out tasks, after RL:\n{format_chain(end)}")
+    out = Path(args.out)
+    save_checkpoint(out, policy, None, step=args.steps, val_loss=float("nan"))
+    (out.parent / "history.json").write_text(json.dumps(res["history"]), encoding="utf-8")
+    (out.parent / "eval.json").write_text(
+        json.dumps({"start": start, "end": end}), encoding="utf-8"
+    )
+    print(f"checkpoint -> {out}")
 
 
 def cmd_hack_demo(args: argparse.Namespace) -> None:
@@ -1954,6 +2045,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--base", default=str(REASON_PRETRAIN_CKPT))
     s.add_argument("--n", type=int, default=20000, help="traces")
     s.add_argument("--max-digits", type=int, default=3)
+    s.add_argument("--min-digits", type=int, default=1)
     s.add_argument(
         "--efforts",
         type=parse_efforts,
@@ -1965,6 +2057,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="share of traces with an empty think block, independent of the effort level",
+    )
+    s.add_argument(
+        "--chain",
+        choices=["think", "tool"],
+        default=None,
+        help="train on chains a+b-c: `think` = no-tool column traces, `tool` = scripted "
+        "calculator calls (observations masked); --ops and --efforts are ignored",
+    )
+    s.add_argument(
+        "--direct-frac",
+        type=float,
+        default=0.0,
+        help="with --chain tool: share of the easy traces answered directly, with no call",
+    )
+    s.add_argument(
+        "--easy-frac",
+        type=float,
+        default=0.0,
+        help="with --chain: share of tasks that are easy 1-digit `a+b` (one call, or none)",
     )
     s.add_argument("--epochs", type=int, default=3)
     s.add_argument("--batch-size", type=int, default=16)
@@ -1985,12 +2096,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--pass-k", type=int, default=0, help="also print pass@k (1-3 digits, k samples at T=1)"
     )
     s.add_argument("--efforts", type=parse_efforts, default=(), help="comma list, e.g. 1,9")
+    s.add_argument(
+        "--chain",
+        choices=["think", "tool"],
+        default=None,
+        help="score chains a+b-c (--n per digit count in --min-digits..--max-digits, at most "
+        "200) with the calculator tool (`tool`) or without (`think`)",
+    )
+    s.add_argument("--min-digits", type=int, default=2, help="with --chain")
+    s.add_argument("--easy", action="store_true", help="with --chain: also score --n easy tasks")
+    s.add_argument("--max-digits", type=int, default=3, help="with --chain")
     s.set_defaults(func=cmd_reason_eval)
 
     s = sub.add_parser("grpo", help="GRPO on verifiable addition from the reasoning SFT model")
     add_grpo_args(s, GRPO_CKPT)
     s.add_argument("--prm", default=None, help="add --prm-weight x P(every step right) to reward")
     s.add_argument("--prm-weight", type=float, default=1.0)
+    s.add_argument(
+        "--chain",
+        choices=["think", "tool"],
+        default=None,
+        help="multi-turn tool-use RL on chains a+b-c (`think`: the no-tool control); reward at "
+        "the episode end; use --max-new-tokens 110 and --min-digits/--max-digits; only "
+        "--steps/--tasks/--group/--lr/--beta/--clip-eps/--mu/--loss-agg/--no-std-norm/--optimizer "
+        "apply",
+    )
+    s.add_argument("--call-cost", type=float, default=0.02, help="--chain: reward cost per call")
+    s.add_argument(
+        "--easy-frac",
+        type=float,
+        default=0.0,
+        help="--chain: share of easy 1-digit `a+b` tasks in training; they are also evaluated",
+    )
+    s.add_argument(
+        "--call-bonus", type=float, default=0.0, help="--chain: pay per well-formed call (hackable)"
+    )
     s.set_defaults(func=cmd_grpo)
 
     s = sub.add_parser("hack-demo", help="GRPO against a hackable grader + CoT monitor")

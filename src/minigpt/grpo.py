@@ -213,6 +213,7 @@ def grpo_step(
     policy_loss: str = "ppo",
     clip_eps_high: float | None = None,
     advantage: str = "group",
+    keeps: list[list[bool]] | None = None,
 ) -> tuple[float, float]:
     """`mu` optimizer steps on one batch; returns `(kl, clip)`: the mean KL to the reference of
     the last step and the `clip_fraction` averaged over the `mu` steps (0 at the first, ratio 1).
@@ -222,7 +223,7 @@ def grpo_step(
     """
     device = next(policy.parameters()).device
     adv = group_advantages(rewards, std_norm, mode=advantage).reshape(-1).to(device)
-    x, y = build_batch(prompts, completions, pad_id)
+    x, y = build_batch(prompts, completions, pad_id, keeps)
     x, y = x.to(device), y.to(device)
     policy.eval()  # dropout off, so the policy at step 0 is exactly the reference
     with torch.no_grad():
