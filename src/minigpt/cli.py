@@ -618,7 +618,7 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
     results: dict[str, Any] = {}
     print(f"{'task':<11}{'n':>6}{'acc':>8}{'se':>7}{'chance':>8}{'acc_norm':>10}{'se':>7}{'s':>6}")
     for task in tasks:
-        items = load_benchmark(task, args.limit)
+        items = load_benchmark(task, args.limit, RAW_DIR)
         t0 = time.perf_counter()
         r = score_multiple_choice(model, tok, items, device, model.config.context_length)
         r["seconds"] = time.perf_counter() - t0

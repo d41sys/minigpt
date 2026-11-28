@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -86,11 +87,19 @@ def to_mc_item(task: str, row: dict[str, Any]) -> MCItem:
     return ctx, options, keys.index(row["answerKey"])
 
 
-def load_benchmark(task: str, limit: int = 0) -> list[MCItem]:
-    """The first `limit` rows of the task's test/validation split (0 = all)."""
+def load_benchmark(task: str, limit: int = 0, cache_dir: Path | None = None) -> list[MCItem]:
+    """The first `limit` rows of the task's test/validation split (0 = all); with `cache_dir`,
+    downloaded once to `bench_<task>_<limit>.json` there."""
+    cache = cache_dir / f"bench_{task}_{limit}.json" if cache_dir else None
+    if cache and cache.exists():
+        return [(c, o, label) for c, o, label in json.loads(cache.read_text(encoding="utf-8"))]
     dataset, config, split = BENCHMARKS[task]
     n = limit or 100_000  # hf_rows stops at the end of the split
-    return [to_mc_item(task, r) for r in hf_rows(dataset, config, split, n)]
+    items = [to_mc_item(task, r) for r in hf_rows(dataset, config, split, n)]
+    if cache:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(items), encoding="utf-8")
+    return items
 
 
 @torch.no_grad()
