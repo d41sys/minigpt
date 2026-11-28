@@ -30,6 +30,9 @@ class GPTConfig:
     bias: bool = True
     use_sdpa: bool = False
     pos_encoding: str = "learned"  # "learned" (GPT-2 wpe table) or "rope" (rotary, no wpe)
+    norm: str = "layernorm"  # "layernorm" or "rmsnorm" (scale only: no mean-centring, no bias)
+    mlp_type: str = "gelu"  # "gelu" (GPT-2) or "swiglu" (silu(gate) * up; d_ff = width of each)
+    num_kv_heads: int = 0  # key/value heads of grouped-query attention; 0 = num_heads (plain MHA)
 
     # DeepSeek-V4 options (toy versions), all off by default so old checkpoints load unchanged.
     n_experts: int = 0  # routed experts per MoE FFN; 0 = dense FFN (report section 2.1)
@@ -51,8 +54,13 @@ class GPTConfig:
     csa_index_dim: int = 16
 
     def __post_init__(self) -> None:
-        if self.d_ff is None:
-            self.d_ff = 4 * self.d_model
+        if not self.d_ff:
+            # swiglu has three matrices, so 8/3 d_model (rounded up to 64) matches 4 d_model gelu
+            self.d_ff = (
+                4 * self.d_model
+                if self.mlp_type == "gelu"
+                else (8 * self.d_model // 3 + 63) // 64 * 64
+            )
         if self.d_model % self.num_heads != 0:
             raise ValueError(
                 f"d_model ({self.d_model}) must be divisible by num_heads ({self.num_heads})"
@@ -61,6 +69,14 @@ class GPTConfig:
             raise ValueError(f"pos_encoding must be 'learned' or 'rope', got {self.pos_encoding!r}")
         if self.pos_encoding == "rope" and (self.d_model // self.num_heads) % 2 != 0:
             raise ValueError("rope needs an even head_dim")
+        if self.norm not in ("layernorm", "rmsnorm"):
+            raise ValueError(f"norm must be 'layernorm' or 'rmsnorm', got {self.norm!r}")
+        if self.mlp_type not in ("gelu", "swiglu"):
+            raise ValueError(f"mlp_type must be 'gelu' or 'swiglu', got {self.mlp_type!r}")
+        if self.num_kv_heads < 0 or self.num_heads % (self.num_kv_heads or self.num_heads):
+            raise ValueError(f"num_heads ({self.num_heads}) must be divisible by num_kv_heads")
+        if self.attn_type == "csa" and self.num_kv_heads not in (0, self.num_heads):
+            raise ValueError("csa attention does not support grouped-query attention")
         if self.attn_type not in ("dense", "csa"):
             raise ValueError(f"attn_type must be 'dense' or 'csa', got {self.attn_type!r}")
         if self.hc_streams < 1 or self.mtp_depth < 0 or self.csa_block < 1:
@@ -70,6 +86,12 @@ class GPTConfig:
                 raise ValueError(f"moe_top_k must be in [1, n_experts={self.n_experts}]")
             if self.moe_d_ff is None:
                 self.moe_d_ff = max(1, self.d_ff // (self.moe_top_k + self.n_shared_experts))
+
+
+def make_norm(config: GPTConfig) -> nn.Module:
+    if config.norm == "rmsnorm":
+        return nn.RMSNorm(config.d_model, eps=1e-5)
+    return nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -89,8 +111,10 @@ class CausalSelfAttention(nn.Module):
         self.use_sdpa = config.use_sdpa
         self.dropout_p = config.dropout
 
-        # Combined Q, K, V projection in one matrix for efficiency
-        self.c_attn = nn.Linear(config.d_model, 3 * config.d_model, bias=config.bias)
+        # Combined Q, K, V projection in one matrix for efficiency; GQA shrinks K and V
+        self.kv_heads = config.num_kv_heads or config.num_heads
+        self.kv_dim = self.kv_heads * self.head_dim
+        self.c_attn = nn.Linear(config.d_model, config.d_model + 2 * self.kv_dim, bias=config.bias)
         # Output projection
         self.c_proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
 
@@ -120,12 +144,12 @@ class CausalSelfAttention(nn.Module):
 
         # Calculate Q, K, V
         qkv = self.c_attn(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        q, k, v = qkv.split([c, self.kv_dim, self.kv_dim], dim=-1)
 
-        # Reshape to (B, num_heads, T, head_dim)
+        # Reshape to (B, heads, T, head_dim); k and v have kv_heads heads
         q = q.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, t, self.kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, t, self.kv_heads, self.head_dim).transpose(1, 2)
 
         # The new tokens sit at absolute positions start .. start+t-1.
         start = cache["k"].size(2) if cache else 0
@@ -139,6 +163,9 @@ class CausalSelfAttention(nn.Module):
                 k = torch.cat((cache["k"], k), dim=2)
                 v = torch.cat((cache["v"], v), dim=2)
             cache["k"], cache["v"] = k, v
+        if self.kv_heads != self.num_heads:  # the cache keeps kv_heads; each serves a query group
+            k = k.repeat_interleave(self.num_heads // self.kv_heads, dim=1)
+            v = v.repeat_interleave(self.num_heads // self.kv_heads, dim=1)
         # Allowed keys for each new query: row i of the full mask, columns up to start+i.
         full_mask: torch.Tensor = self.bias  # type: ignore[assignment]
         mask = full_mask[:, :, start : start + t, : start + t]
@@ -290,19 +317,24 @@ class CompressedSparseAttention(CausalSelfAttention):
 
 
 class FeedForward(nn.Module):
-    """Position-wise Feed-Forward Network with GELU activation."""
+    """Position-wise feed-forward network: GELU (GPT-2) or SwiGLU (`mlp_type`)."""
 
     def __init__(self, config: GPTConfig, d_ff: int | None = None) -> None:
         super().__init__()
         d_ff = d_ff or config.d_ff or 4 * config.d_model
-        self.c_fc = nn.Linear(config.d_model, d_ff, bias=config.bias)
-        self.gelu = nn.GELU(approximate="tanh")
+        self.swiglu = config.mlp_type == "swiglu"
+        # SwiGLU: one matrix makes gate and up side by side
+        self.c_fc = nn.Linear(config.d_model, (2 if self.swiglu else 1) * d_ff, bias=config.bias)
         self.c_proj = nn.Linear(d_ff, config.d_model, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.c_fc(x)
-        h = self.gelu(h)
+        if self.swiglu:
+            gate, up = h.chunk(2, dim=-1)
+            h = F.silu(gate) * up
+        else:
+            h = F.gelu(h, approximate="tanh")
         h = self.c_proj(h)
         result: torch.Tensor = self.dropout(h)
         return result
@@ -420,13 +452,13 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, config: GPTConfig, moe: bool = False, hc: bool = False) -> None:
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
+        self.ln_1 = make_norm(config)
         self.attn = (
             CompressedSparseAttention(config)
             if config.attn_type == "csa"
             else CausalSelfAttention(config)
         )
-        self.ln_2 = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
+        self.ln_2 = make_norm(config)
         self.mlp = MoEFeedForward(config) if moe else FeedForward(config)
         self.hc_attn: HyperConnection | None = None
         self.hc_mlp: HyperConnection | None = None
@@ -455,8 +487,8 @@ class MTPModule(nn.Module):
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.ln_h = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
-        self.ln_e = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
+        self.ln_h = make_norm(config)
+        self.ln_e = make_norm(config)
         self.proj = nn.Linear(2 * config.d_model, config.d_model, bias=False)
         self.block = TransformerBlock(config)
 
@@ -485,7 +517,7 @@ class GPTModel(nn.Module):
             )
             for i in range(config.num_layers)
         )
-        self.ln_f = nn.LayerNorm(config.d_model, eps=1e-5, bias=config.bias)
+        self.ln_f = make_norm(config)
 
         # Output LM Head (without bias)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)

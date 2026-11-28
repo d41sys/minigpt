@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import torch
@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from minigpt.bpe import BPETokenizer
+from minigpt.data import hf_rows
 from minigpt.dpo import compute_sequence_log_probs
 from minigpt.sft import build_sft_example, sft_collate_fn
 from minigpt.train import get_device
@@ -52,6 +53,95 @@ def likelihood_ranking(
         wins_sum += int(logp[0] > logp[1])
         wins_per_token += int(logp[0] / n_tok[0] > logp[1] / n_tok[1])
     return wins_sum, wins_per_token
+
+
+# Multiple-choice benchmarks, zero-shot, scored by summed log-probability of each option given
+# the context (the lm-evaluation-harness prompts). Rows come from the Hugging Face datasets
+# server: name -> (dataset, config, split).
+BENCHMARKS = {
+    "arc_easy": ("allenai/ai2_arc", "ARC-Easy", "test"),
+    "piqa": ("baber/piqa", "default", "validation"),
+    "openbookqa": ("allenai/openbookqa", "main", "test"),
+    "hellaswag": ("Rowan/hellaswag", "default", "validation"),
+}
+
+MCItem = tuple[str, list[str], int]  # (context, options, index of the right option)
+
+
+def _hellaswag_clean(text: str) -> str:
+    """lm-evaluation-harness preprocessing: drop WikiHow "[title]" tags and [bracketed] spans."""
+    return re.sub(r"\[.*?\]", "", text.strip().replace(" [title]", ". ")).replace("  ", " ")
+
+
+def to_mc_item(task: str, row: dict[str, Any]) -> MCItem:
+    """One benchmark row as (context, options, label)."""
+    if task == "hellaswag":
+        ctx = f"{row['activity_label']}: {row['ctx_a']} {row['ctx_b'].capitalize()}"
+        ctx = _hellaswag_clean(ctx)
+        return ctx, [_hellaswag_clean(e) for e in row["endings"]], int(row["label"])
+    if task == "piqa":
+        return f"Question: {row['goal']}\nAnswer:", [row["sol1"], row["sol2"]], int(row["label"])
+    options, keys = row["choices"]["text"], row["choices"]["label"]
+    ctx = row["question_stem"] if task == "openbookqa" else f"Question: {row['question']}\nAnswer:"
+    return ctx, options, keys.index(row["answerKey"])
+
+
+def load_benchmark(task: str, limit: int = 0) -> list[MCItem]:
+    """The first `limit` rows of the task's test/validation split (0 = all)."""
+    dataset, config, split = BENCHMARKS[task]
+    n = limit or 100_000  # hf_rows stops at the end of the split
+    return [to_mc_item(task, r) for r in hf_rows(dataset, config, split, n)]
+
+
+@torch.no_grad()
+def score_multiple_choice(
+    model: nn.Module,
+    tokenizer: BPETokenizer,
+    items: list[MCItem],
+    device: torch.device,
+    max_length: int,
+) -> dict[str, Any]:
+    """Accuracy of choosing the option with the highest summed log-probability given its context.
+
+    `acc_norm` divides each option's log-probability by its length in characters (the harness's
+    acc_norm), which removes the bias towards short options. `stderr` is sqrt(p (1 - p) / n);
+    `chance` is the mean of 1 / number of options. Ties go to the first option. Over-long
+    sequences keep their last `max_length` input tokens.
+    """
+    model.eval()
+    hits: list[int] = []
+    hits_norm: list[int] = []
+    for ctx, options, label in items:
+        ctx_ids = tokenizer.encode(ctx)
+        batch = []
+        for option in options:
+            cont = tokenizer.encode(" " + option)
+            full = (ctx_ids + cont)[-(max_length + 1) :]
+            n_cont = min(len(cont), len(full) - 1)
+            tgt = [-100] * (len(full) - 1 - n_cont) + full[len(full) - n_cont :]
+            batch.append((torch.tensor(full[:-1]), torch.tensor(tgt)))
+        x, y = sft_collate_fn(batch)
+        logp = compute_sequence_log_probs(model, x.to(device), y.to(device)).cpu()
+        hits.append(int(logp.argmax() == label))
+        per_char = logp / torch.tensor([float(len(o)) for o in options])
+        hits_norm.append(int(per_char.argmax() == label))
+    n = len(items)
+
+    def mean_se(h: list[int]) -> tuple[float, float]:
+        p = sum(h) / n
+        return p, math.sqrt(p * (1 - p) / n)
+
+    acc, stderr = mean_se(hits)
+    acc_norm, stderr_norm = mean_se(hits_norm)
+    return {
+        "n": n,
+        "acc": acc,
+        "stderr": stderr,
+        "acc_norm": acc_norm,
+        "stderr_norm": stderr_norm,
+        "chance": sum(1 / len(o) for _, o, _ in items) / n,
+        "correct": hits,
+    }
 
 
 def compute_perplexity(

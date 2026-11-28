@@ -37,7 +37,7 @@ from minigpt.cai import (
     sample_responses,
     split_prompts,
 )
-from minigpt.data import MixedLoader, create_dataloader, split_val_test
+from minigpt.data import MixedLoader, create_dataloader, hf_rows, split_val_test, tokenize_cached
 from minigpt.dpo import (
     PreferenceDataset,
     PreferenceSample,
@@ -45,6 +45,7 @@ from minigpt.dpo import (
     train_dpo,
 )
 from minigpt.evaluate import (
+    BENCHMARKS,
     EvalReport,
     Judge,
     MockJudge,
@@ -53,7 +54,9 @@ from minigpt.evaluate import (
     exact_match,
     holm_adjust,
     likelihood_ranking,
+    load_benchmark,
     paired_bootstrap_test,
+    score_multiple_choice,
     token_f1,
     wilson_interval,
 )
@@ -136,6 +139,12 @@ TINY_STORIES_URL = (
     "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-train.txt"
 )
 TINY_STORIES_BYTES = 50_000_000  # first 50 MB of the 1.9 GB train file, ~21M tokens
+CHATMIX_TINYSTORIES_BYTES = 300_000_000
+CHATMIX_FINEWEB_DOCS = 60_000  # ~4.5 kB each
+DOLLY_URL = (
+    "https://huggingface.co/datasets/databricks/databricks-dolly-15k/resolve/main/"
+    "databricks-dolly-15k.jsonl"
+)
 RAW_DIR = Path("data/raw")
 TOKENIZER_PATH = Path("runs/tokenizer.json")
 PRETRAIN_CKPT = Path("runs/pretrain/ckpt.pt")
@@ -214,10 +223,21 @@ def tinystories_splits(tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
     return ids[:n], ids[n:]
 
 
-CORPUS_NAMES = ("tinyshakespeare", "tinystories")
+def chatmix_splits(tokenizer: BPETokenizer) -> tuple[torch.Tensor, list[int]]:
+    """90/10 cut of the cached chatmix tokens; training tokens stay a tensor (~10^8 ints)."""
+    ids = tokenize_cached(
+        tokenizer, RAW_DIR / "chatmix.txt", RAW_DIR / f"chatmix.v{tokenizer.vocab_size}.npy"
+    )
+    n = int(len(ids) * 0.9)
+    return torch.from_numpy(ids[:n].astype(np.int64)), ids[n:].tolist()
 
 
-def corpus_splits(name: str, tokenizer: BPETokenizer) -> tuple[list[int], list[int]]:
+CORPUS_NAMES = ("tinyshakespeare", "tinystories", "chatmix")
+
+
+def corpus_splits(name: str, tokenizer: BPETokenizer) -> tuple[Any, list[int]]:
+    if name == "chatmix":
+        return chatmix_splits(tokenizer)
     return (tinystories_splits if name == "tinystories" else shakespeare_splits)(tokenizer)
 
 
@@ -228,6 +248,50 @@ def load_alpaca() -> list[dict[str, str]]:
     return rows
 
 
+def download_dolly(path: Path) -> Path:
+    """Dolly-15k (CC BY-SA 3.0) as Alpaca-style rows: instruction, input = context, output."""
+    if not path.exists():
+        req = urllib.request.Request(DOLLY_URL, headers={"User-Agent": "minigpt"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            lines = resp.read().decode("utf-8").splitlines()
+        rows = [
+            {"instruction": d["instruction"], "input": d["context"], "output": d["response"]}
+            for d in map(json.loads, lines)
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rows), encoding="utf-8")
+    return path
+
+
+def load_sft_rows(dataset: str) -> list[dict[str, str]]:
+    if dataset == "dolly":
+        rows: list[dict[str, str]] = json.loads(
+            download_dolly(RAW_DIR / "dolly_15k.json").read_text("utf-8")
+        )
+        return rows
+    return load_alpaca()
+
+
+def download_chatmix(raw_dir: Path, tinystories_bytes: int, fineweb_docs: int) -> Path:
+    """A TinyStories prefix plus FineWeb-edu (sample-10BT) rows as one shuffled stream of
+    `<|endoftext|>`-ended documents, so the 90/10 cut holds both; raises on network failure."""
+    path = raw_dir / "chatmix.txt"
+    if not path.exists():
+        eot = "<|endoftext|>"
+        stories = download_tinystories(raw_dir / "chatmix_parts", tinystories_bytes)
+        docs = stories.read_text(encoding="utf-8").split(eot)[:-1]
+        stories.unlink()
+        stories.parent.rmdir()
+        for row in hf_rows("HuggingFaceFW/fineweb-edu", "sample-10BT", "train", fineweb_docs):
+            docs.append(row["text"].replace(eot, ""))
+        docs = [d.strip() for d in docs if d.strip()]
+        random.Random(0).shuffle(docs)
+        tmp = path.with_suffix(".part")
+        tmp.write_text(eot.join(docs) + eot, encoding="utf-8")
+        tmp.replace(path)
+    return path
+
+
 def cmd_data(args: argparse.Namespace) -> None:
     raw = Path(args.dir)
     if args.dataset == "spam":
@@ -236,6 +300,11 @@ def cmd_data(args: argparse.Namespace) -> None:
         print(f"tiny-Shakespeare ready at {download_tinyshakespeare(raw)}")
     elif args.dataset == "tinystories":
         print(f"TinyStories slice ready at {download_tinystories(raw)}")
+    elif args.dataset == "dolly":
+        print(f"Dolly-15k ready at {download_dolly(raw / 'dolly_15k.json')}")
+    elif args.dataset == "chatmix":
+        path = download_chatmix(raw, args.tinystories_bytes, args.fineweb_docs)
+        print(f"TinyStories + FineWeb-edu mix ready at {path}")
     else:
         print(f"Alpaca 1k ready at {download_alpaca_data(raw / 'alpaca_1k.json')}")
 
@@ -243,6 +312,9 @@ def cmd_data(args: argparse.Namespace) -> None:
 def cmd_train_tokenizer(args: argparse.Namespace) -> None:
     corpus = Path(args.corpus) if args.corpus else download_tinyshakespeare()
     text = corpus.read_text(encoding="utf-8", errors="replace")
+    # Pure-Python BPE training is O(merges x text): train on a prefix of a large corpus. The
+    # document separator is dropped so "endoftext" does not become merges.
+    text = text[: args.sample_chars or None].replace("<|endoftext|>", "\n\n")
     tok = BPETokenizer()
     tok.train(text, target_vocab_size=args.vocab_size)
     tok.save(args.out)
@@ -254,7 +326,7 @@ def cmd_train_tokenizer(args: argparse.Namespace) -> None:
 
 
 def half_losses(
-    model: GPTModel, halves: dict[str, list[int]], batch_size: int, device: torch.device
+    model: GPTModel, halves: dict[str, Any], batch_size: int, device: torch.device
 ) -> dict[str, list[float]]:
     """Per-window loss of every non-overlapping window of each token half (dropout off)."""
     model.to(device)
@@ -280,6 +352,9 @@ def format_half_losses(losses: dict[str, list[float]]) -> str:
 
 # GPTConfig fields exposed as `--kebab-case` flags (DeepSeek-V4 options, all off by default).
 ARCH_FIELDS = (
+    "norm",
+    "mlp_type",
+    "num_kv_heads",
     "n_experts",
     "n_shared_experts",
     "moe_top_k",
@@ -299,11 +374,16 @@ def add_arch_args(s: argparse.ArgumentParser) -> None:
     for name in ARCH_FIELDS:
         default = getattr(GPTConfig, name)
         s.add_argument("--" + name.replace("_", "-"), type=type(default), default=default)
+    s.add_argument("--d-ff", type=int, default=0, help="FFN width; 0 = 4 d_model (8/3 for swiglu)")
     s.add_argument("--moe-dense-first", action="store_true", help="keep layer 0 dense")
 
 
 def arch_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    return {**{f: getattr(args, f) for f in ARCH_FIELDS}, "moe_dense_first": args.moe_dense_first}
+    return {
+        **{f: getattr(args, f) for f in ARCH_FIELDS},
+        "d_ff": args.d_ff,
+        "moe_dense_first": args.moe_dense_first,
+    }
 
 
 def cmd_pretrain(args: argparse.Namespace) -> None:
@@ -373,6 +453,8 @@ def cmd_pretrain(args: argparse.Namespace) -> None:
         min_lr_ratio=1.0 if args.constant_lr else 0.1,
     )
     seconds = time.perf_counter() - t0
+    tokens = args.steps * args.grad_accum * args.batch_size * cfg.context_length
+    print(f"trained {args.steps} steps in {seconds:.0f}s: {tokens / seconds:,.0f} tokens/s")
     for row in res["history"]:
         print(
             f"step {int(row['step']):5d} train {row['train_loss']:.4f} "
@@ -498,10 +580,11 @@ def cmd_sft(args: argparse.Namespace) -> None:
     device = get_device()
     tok = load_tokenizer()
     model = load_model(require(Path(args.base), "pretrain"))
-    rows = load_alpaca()
+    rows = load_sft_rows(args.dataset)
     train_rows = rows[:-SFT_HELDOUT]
     ds = SFTDataset(train_rows, tok, max_length=model.config.context_length)
     print(f"device={device} sft_examples={len(ds)} heldout={SFT_HELDOUT}")
+    t0 = time.perf_counter()
     res = train_sft(
         model,
         ds,
@@ -511,13 +594,41 @@ def cmd_sft(args: argparse.Namespace) -> None:
         optim=args.optim,
         device=device,
     )
+    seconds = time.perf_counter() - t0
     for row in res["history"]:
         print(f"epoch {row['epoch']} loss {row['loss']:.4f}")
-    save_checkpoint(SFT_CKPT, model, None, step=args.epochs, val_loss=res["final_loss"])
+    tokens = args.epochs * sum(len(x) for x, _ in ds.examples)
+    print(f"trained in {seconds:.0f}s: {tokens / seconds:,.0f} tokens/s (padding not counted)")
+    out = Path(args.out)
+    save_checkpoint(out, model, None, step=args.epochs, val_loss=res["final_loss"])
     held = rows[-SFT_HELDOUT]
-    print(f"checkpoint -> {SFT_CKPT}\n\n### Instruction: {held['instruction']}")
+    print(f"checkpoint -> {out}\n\n### Instruction: {held['instruction']}")
     print(f"### Model: {sample_response(model, tok, held, device)[0]}")
     print(f"### Reference: {held['output'][:200]}")
+
+
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    """Zero-shot multiple-choice accuracy by summed option log-probability, with standard errors."""
+    tasks = args.tasks.split(",")
+    if unknown := [t for t in tasks if t not in BENCHMARKS]:
+        sys.exit(f"unknown task {unknown}; choose from {', '.join(BENCHMARKS)}")
+    device = get_device()
+    tok = load_tokenizer()
+    model = load_model(require(Path(args.checkpoint), "pretrain")).to(device)
+    results: dict[str, Any] = {}
+    print(f"{'task':<11}{'n':>6}{'acc':>8}{'se':>7}{'chance':>8}{'acc_norm':>10}{'se':>7}{'s':>6}")
+    for task in tasks:
+        items = load_benchmark(task, args.limit)
+        t0 = time.perf_counter()
+        r = score_multiple_choice(model, tok, items, device, model.config.context_length)
+        r["seconds"] = time.perf_counter() - t0
+        results[task] = r
+        print(
+            f"{task:<11}{r['n']:>6}{r['acc']:>8.3f}{r['stderr']:>7.3f}{r['chance']:>8.3f}"
+            f"{r['acc_norm']:>10.3f}{r['stderr_norm']:>7.3f}{r['seconds']:>6.0f}"
+        )
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(results) + "\n", encoding="utf-8")
 
 
 def cmd_dpo(args: argparse.Namespace) -> None:
@@ -1655,23 +1766,50 @@ def cmd_generate(args: argparse.Namespace) -> None:
     device = get_device()
     tok = load_tokenizer()
     model = load_model(require(Path(args.checkpoint), "pretrain")).to(device)
-    x = torch.tensor([tok.encode(args.prompt)], dtype=torch.long, device=device)
-    out = model.generate(x, args.max_tokens, temperature=args.temperature, top_k=args.top_k)
-    print(tok.decode(out[0].tolist()))
+    prompt = format_prompt(args.prompt) if args.chat else args.prompt
+    x = torch.tensor([tok.encode(prompt)], dtype=torch.long, device=device)
+    eos = tok.eos_token_id if args.chat else None
+    out = model.generate(
+        x, args.max_tokens, temperature=args.temperature, top_k=args.top_k, eos_token_id=eos
+    )
+    ids = out[0].tolist()
+    if args.chat:  # the reply only, up to <|endoftext|>
+        ids = [t for t in ids[x.size(1) :] if t != tok.eos_token_id]
+    print(tok.decode(ids))
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="minigpt", description="GPT from scratch.")
+    p.add_argument(
+        "--tokenizer", default=str(TOKENIZER_PATH), help="tokenizer JSON, before the command"
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("data", help="download a dataset into data/raw")
-    s.add_argument("dataset", choices=["spam", "tinyshakespeare", "tinystories", "alpaca"])
+    s.add_argument(
+        "dataset", choices=["spam", "tinyshakespeare", "tinystories", "alpaca", "dolly", "chatmix"]
+    )
     s.add_argument("--dir", default=str(RAW_DIR))
+    s.add_argument(
+        "--tinystories-bytes",
+        type=int,
+        default=CHATMIX_TINYSTORIES_BYTES,
+        help="chatmix: size of the TinyStories prefix",
+    )
+    s.add_argument(
+        "--fineweb-docs",
+        type=int,
+        default=CHATMIX_FINEWEB_DOCS,
+        help="chatmix: number of FineWeb-edu documents",
+    )
     s.set_defaults(func=cmd_data)
 
     s = sub.add_parser("train-tokenizer", help="train byte-level BPE")
     s.add_argument("--corpus", default=None, help="text file (default: tiny-Shakespeare)")
     s.add_argument("--vocab-size", type=int, default=1024)
+    s.add_argument(
+        "--sample-chars", type=int, default=0, help="train on the first N characters (0 = all)"
+    )
     s.add_argument("--out", default=str(TOKENIZER_PATH))
     s.set_defaults(func=cmd_train_tokenizer)
 
@@ -1761,8 +1899,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     s.set_defaults(func=cmd_finetune_cls)
 
-    s = sub.add_parser("sft", help="instruction-tune on Alpaca 1k")
+    s = sub.add_parser("sft", help="instruction-tune on Alpaca 1k or Dolly-15k")
     s.add_argument("--base", default=str(PRETRAIN_CKPT))
+    s.add_argument("--dataset", choices=["alpaca", "dolly"], default="alpaca")
+    s.add_argument("--out", default=str(SFT_CKPT))
     s.add_argument("--epochs", type=int, default=3)
     s.add_argument("--lr", type=float, default=3e-4)
     s.add_argument("--batch-size", type=int, default=8)
@@ -2100,12 +2240,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--temperature", type=float, default=0.8)
     s.add_argument("--top-k", type=int, default=40)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--chat",
+        action="store_true",
+        help="wrap --prompt in the instruction template, stop at <|endoftext|>, print the reply",
+    )
     s.set_defaults(func=cmd_generate)
+
+    s = sub.add_parser("benchmark", help="zero-shot multiple-choice accuracy with standard errors")
+    s.add_argument("--checkpoint", default=str(PRETRAIN_CKPT))
+    s.add_argument("--tasks", default=",".join(BENCHMARKS), help="comma-separated subset")
+    s.add_argument("--limit", type=int, default=0, help="first N rows per task (0 = all)")
+    s.add_argument("--json-out", default=None, help="write results and per-row hits as JSON")
+    s.set_defaults(func=cmd_benchmark)
     return p
 
 
 def main(argv: list[str] | None = None) -> None:
+    global TOKENIZER_PATH
     args = build_parser().parse_args(argv)
+    TOKENIZER_PATH = Path(args.tokenizer)
     args.func(args)
 
 
