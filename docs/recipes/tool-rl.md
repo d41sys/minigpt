@@ -84,6 +84,10 @@ reading below, which was also fixed first):
   cost, does the call rate on them drop without losing accuracy? Reading: easy calls per
   episode fall by at least 0.3 and easy accuracy falls by at most 0.05 (n = 100 easy tasks,
   drawn from the 155-prompt easy space, so training prompts are not held out).
+  Setup (calibrated on seed 99: with 6 epochs the model could not answer easy tasks directly,
+  accuracy 0.10-0.53 whereas with a call it was 1.00; 15 epochs fix that): SFT 4000 traces, 15
+  epochs, `--easy-frac 0.5 --direct-frac 0.2`, then 200 GRPO steps with `--easy-frac 0.5` at
+  `--call-cost` 0 (control), 0.02 and 0.1; all other flags as in the arms table.
 
 ## Calibration (seed 99, run before the seeds; not part of the results)
 
