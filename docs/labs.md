@@ -67,7 +67,7 @@ reward model (row 8) is the only one DeepSeek documents. **I**: none used for th
 | 15, 12 | Generative / rubric reward model | none; closest is the LLM judge in `cai-data` | missing | The judge is a frozen Ollama model, not the policy, and has no per-prompt rubric |
 | 16, 18 | Multi-teacher on-policy distillation | `opd --teacher +=PATH --teacher=-=PATH` | has | Held-out reverse KL cut by more than half on both operators (1 seed). Off-policy did as well |
 | 17 | FP4 QAT | none | missing | |
-| 18 | Agent task synthesis, environments, async RL | none | missing | Merging runs is `merge`, tested only as expert merging (never beat the base by 0.05) |
+| 18 | Agent task synthesis, environments, async RL | `--chain tool` on `reason-sft`, `grpo`; [`docs/recipes/tool-rl.md`](recipes/tool-rl.md) | partial | One simulated calculator, scripted traces, multi-turn rollout with the reward at the end of the episode. GRPO after SFT: no measurable difference (0.270–0.935 vs 0.290–0.900, 4 seeds). No task synthesis, no async RL. Merging runs is `merge`, tested only as expert merging (never beat the base by 0.05) |
 
 What toy scale cannot show:
 
@@ -165,7 +165,7 @@ not say). **I**: that o-series RL is "GRPO-like" is an outsider guess; the lab h
 | 1 | Reward model | `reward-model` | has | Held-out pairwise accuracy 0.827 with 1,908 pairs; 0.500 (chance) with the default 232 |
 | 1 | PPO + KL to SFT | `ppo` | has | Gold accuracy fell at every beta; unstable, not a clean overoptimization curve. No PPO-ptx |
 | 2 | Process reward model | `prm`, `best-of-n`, `grpo --prm`; [`docs/recipes/prm.md`](recipes/prm.md) | has | Step labels from an exact checker, not humans. Best-of-16 on 3 digits: PRM 0.245–0.365 beats ORM 0.100–0.140; no measurable difference from majority vote (0.355). Post hoc, at N=16 majority vote beats the PRM at 1 digit (0.945 vs 0.815–0.870) and 2 digits (0.710 vs 0.585–0.665), so the PRM's lead over majority shrinks as N grows, the opposite of the paper's trend. PRM-shaped GRPO reward: no measurable difference (4 seeds) |
-| 3, 10 | Instruction hierarchy, harmony format, tools | none | missing | |
+| 3, 10 | Instruction hierarchy, harmony format, tools | `--chain tool` for one tool-call format; [`docs/recipes/tool-rl.md`](recipes/tool-rl.md) | partial | Tool calls only (see DeepSeek row 18); no instruction hierarchy, no harmony format |
 | 4 | Model Spec | [`docs/cai/constitution.md`](cai/constitution.md) plays the role of a spec for the judge | partial | |
 | 5 | Rule-based rewards | none as such; `lenient_reward` and `accuracy_reward` are rule graders | partial | The rule-grader exploit is `hack-demo` |
 | 6 | o-series CoT RL | `grpo` on `<think>` traces | has | Sharpens a trained base (0.68 / 0.62 / 0.30 base, 1.00 / 0.93 / 0.75 after, 3 seeds); cannot reach 4-5 digits |
@@ -224,3 +224,6 @@ reward model and OpenAI's spec-aware judge are both LLM-as-reward designs.
 | CoT monitor and reward hacking | `hack-demo` | [README](../README.md#cot-monitor-and-reward-hacking) |
 | Process reward model | `prm`, `best-of-n` | [`recipes/prm.md`](recipes/prm.md) |
 | Constitutional classifiers + probe | `guard` | [`recipes/constitutional-classifiers.md`](recipes/constitutional-classifiers.md) |
+| Tool-use RL with a delayed reward | `reason-sft --chain tool`, `grpo --chain tool` | [`recipes/tool-rl.md`](recipes/tool-rl.md) |
+| A 50M chat model and multiple-choice benchmarks | `data chatmix`, `pretrain`, `sft`, `generate --chat`, `benchmark` | [`recipes/chat-model.md`](recipes/chat-model.md) |
+| Every loss in one table | | [`algorithms.md`](algorithms.md) |
