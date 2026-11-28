@@ -59,7 +59,7 @@ rule (range overlap and a minimum gap) is in the linked document.
 
 ## The formulas
 
-Notation. Prompt $x$, completion $y = (y_1, \dots, y_T)$, completion mask $m_t \in \{0, 1\}$ (prompt
+Notation. Prompt $x$, completion $y = (y_1, \dots, y_T)$, completion mask $m_t \in \lbrace 0, 1 \rbrace$ (prompt
 and padding are 0). $\ell_t = \log \pi_\theta(y_t \mid x, y_{<t})$, and $\ell_t^{\text{ref}}$,
 $\ell_t^{\text{old}}$ are the same under the reference and under the policy at the start of the
 step. $\rho_t = \exp(\ell_t - \ell_t^{\text{old}})$. $\sigma$ is the sigmoid.
@@ -74,7 +74,7 @@ cross-entropy on one logit vector per sequence.
 
 ### Auxiliary: S2
 
-$$\mathcal{L} = \mathcal{L}_{\text{CE}} + \lambda_{\text{mtp}} \cdot \frac{1}{D}\sum_{d=1}^{D} \mathrm{CE}_d + \sum_{\text{layers}} \texttt{balance\_loss}$$
+$$\mathcal{L} = \mathcal{L}_{\text{CE}} + \lambda_{\text{mtp}} \cdot \frac{1}{D}\sum_{d=1}^{D} \mathrm{CE}_d + \sum_{\text{layers}} \mathcal{L}_{\text{balance}}$$
 
 $\mathrm{CE}_d$ is the cross-entropy of MTP module $d$ on the token $d + 1$ positions ahead
 (`_aux_losses`). The balance term is a quoted line, not re-derived:
@@ -111,10 +111,10 @@ Per-token reward, with the reward-model score $s_\phi$ added on the last complet
 $$r_t = -\beta\,(\ell_t - \ell_t^{\text{ref}})\,m_t + s_\phi \cdot \mathbb{1}[t = T]$$
 
 $\hat A_t$ is GAE over $r_t$ and the value head's $V_t$ ($\gamma = 1$, $\lambda = 0.95$), then
-whitened over the masked tokens: $\hat A \leftarrow (\hat A - \mu) / \sqrt{\operatorname{var} + 10^{-8}}$.
+whitened over the masked tokens: $\hat A \leftarrow (\hat A - \mu) / \sqrt{\mathrm{var} + 10^{-8}}$.
 The return $R_t = \hat A_t + V_t$ is taken before whitening.
 
-$$\mathcal{L} = -\frac{\sum_t m_t \min\big(\rho_t \hat A_t,\ \operatorname{clip}(\rho_t, 1 \pm \epsilon)\hat A_t\big)}{\sum_t m_t} + c_v \cdot \tfrac12\,\overline{\max\big((V_t - R_t)^2,\ (V^{\text{old}}_t + \operatorname{clip}(V_t - V^{\text{old}}_t, \pm\epsilon_v) - R_t)^2\big)}$$
+$$\mathcal{L} = -\frac{\sum_t m_t \min\big(\rho_t \hat A_t,\ \mathrm{clip}(\rho_t, 1 \pm \epsilon)\hat A_t\big)}{\sum_t m_t} + c_v \cdot \tfrac12\,\overline{\max\big((V_t - R_t)^2,\ (V^{\text{old}}_t + \mathrm{clip}(V_t - V^{\text{old}}_t, \pm\epsilon_v) - R_t)^2\big)}$$
 
 Here $\beta = 0.02$, $\epsilon = \epsilon_v = 0.2$, $c_v = 0.1$, two epochs of minibatches of 16. The
 KL is a reward (the single-sample estimator $\ell_t - \ell_t^{\text{ref}}$), not a loss term. The
@@ -122,28 +122,28 @@ value head shares the policy's body.
 
 ### GRPO: G1 to G9
 
-Advantage, per group of $G$ rewards ($\operatorname{std}$ is the population std):
+Advantage, per group of $G$ rewards ($\mathrm{std}$ is the population std):
 
-$$A_i = \frac{r_i - \bar r}{\operatorname{std}(r) + 10^{-4}}$$
+$$A_i = \frac{r_i - \bar r}{\mathrm{std}(r) + 10^{-4}}$$
 
 Loss, with $k_3 = e^{d} - d - 1$ and $d = \ell_t^{\text{ref}} - \ell_t$ (non-negative, 0 when the
 policy equals ref):
 
-$$\mathcal{L} = -\operatorname{agg}_{i,t}\Big[\, m_t \big( S_t - \beta \, k_3 \big) \Big], \qquad S_t = \min\big(\rho_t A_i,\ \operatorname{clip}(\rho_t,\, 1-\epsilon,\, 1+\epsilon_{h})\, A_i\big)$$
+$$\mathcal{L} = -\mathrm{agg}_{i,t}\Big[\, m_t \big( S_t - \beta \, k_3 \big) \Big], \qquad S_t = \min\big(\rho_t A_i,\ \mathrm{clip}(\rho_t,\, 1-\epsilon,\, 1+\epsilon_{h})\, A_i\big)$$
 
 The surrogate $S_t$ and the aggregation `agg` are the flags:
 
 | Flag value | Surrogate $S_t$ or aggregation |
 |---|---|
 | `--policy-loss ppo` | $S_t$ as above |
-| `--policy-loss gspo` | one ratio per sequence, $s_i = \exp\big(\frac{1}{\sum_t m_t}\sum_t m_t (\ell_t - \ell_t^{\text{old}})\big)$, in $\min(s_i A_i,\ \operatorname{clip}(s_i, 1-\epsilon, 1+\epsilon_h) A_i)$ |
-| `--policy-loss cispo` | $S_t = \operatorname{sg}\big(\operatorname{clip}(\rho_t, 1-\epsilon, 1+\epsilon_h)\big)\, A_i\, \ell_t$ |
+| `--policy-loss gspo` | one ratio per sequence, $s_i = \exp\big(\frac{1}{\sum_t m_t}\sum_t m_t (\ell_t - \ell_t^{\text{old}})\big)$, in $\min(s_i A_i,\ \mathrm{clip}(s_i, 1-\epsilon, 1+\epsilon_h) A_i)$ |
+| `--policy-loss cispo` | $S_t = \mathrm{sg}\big(\mathrm{clip}(\rho_t, 1-\epsilon, 1+\epsilon_h)\big)\, A_i\, \ell_t$ |
 | `--loss-agg seq-mean` | $\frac{1}{N}\sum_i \frac{1}{\lvert y_i \rvert}\sum_t(\cdot)$, $N$ = rows |
 | `--loss-agg token-sum` | $\frac{1}{N}\sum_i \frac{1}{L_{\max}}\sum_t(\cdot)$, $L_{\max}$ = `max_new_tokens` |
 | `--loss-agg token-mean` | $\sum_{i,t}(\cdot) \big/ \sum_{i,t} m_t$ over the batch |
 | `--loss-agg group-mean` | per group of $G$ rows: $\sum_{i,t}(\cdot)$ over the group's total length, then the mean over groups |
-| `--advantage batch` | $A_i = (r_i - \bar r) / (\operatorname{std}_{\text{batch}}(r - \bar r) + 10^{-4})$, std over all centred values of the batch |
-| `--advantage rloo` | $A_i = \frac{G}{G-1}(r_i - \bar r) = r_i - \operatorname{mean}(r_{-i})$ |
+| `--advantage batch` | $A_i = (r_i - \bar r) / (\mathrm{std}_{\text{batch}}(r - \bar r) + 10^{-4})$, std over all centred values of the batch |
+| `--advantage rloo` | $A_i = \frac{G}{G-1}(r_i - \bar r) = r_i - \mathrm{mean}(r_{-i})$ |
 | `--no-std-norm` | $A_i = r_i - \bar r$ |
 | `--unbiased-kl` | $k_3 \leftarrow \rho_t\, k_3$, with $\rho_t$ **not** detached (the code multiplies by `ratio`, which carries gradient) |
 | `--clip-eps-high` | sets $\epsilon_h$; default $\epsilon_h = \epsilon$ |
@@ -176,7 +176,7 @@ $$\text{D1: } \sum_v p_s(v)\,[\log p_s(v) - \log p_t(v)], \qquad \text{D2: } \su
 The gradient goes through $p_s$ at each prefix, not through the sampling of the prefix. D3 replaces
 the sum over $v$ by the one sampled token $y_t$:
 
-$$\mathcal{L}_{\text{D3}} = -\frac{1}{\sum m}\sum_t m_t \operatorname{clip}\big(\operatorname{sg}(\log p_t(y_t) - \ell_t),\ \pm r_{\max}\big)\,\ell_t, \qquad r_{\max} = 5$$
+$$\mathcal{L}_{\text{D3}} = -\frac{1}{\sum m}\sum_t m_t \,\mathrm{clip}\big(\mathrm{sg}(\log p_t(y_t) - \ell_t),\ \pm r_{\max}\big)\,\ell_t, \qquad r_{\max} = 5$$
 
 D4 is plain cross-entropy (S1 on completions) on the teacher's samples. D5 splits the batch by
 operator, computes D1 against that operator's teacher, and weights each part by its share of
